@@ -1,4 +1,4 @@
-import type { ModelOptionProvider, ModelOptionsResult } from '@hermes/shared'
+import type { ModelOptionProvider, ModelOptionsResult, ModelPricing } from '@hermes/shared'
 import { DEFAULT_REASONING_EFFORT } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
@@ -66,6 +66,31 @@ import { type FastControl, ModelEditSubmenu, resolveFastControl } from './model-
 // hover-revealed edit submenu (reasoning/fast) stays open to play with (its
 // items preventDefault on select).
 export const ModelMenuCloseContext = createContext<() => void>(() => {})
+
+/** Compact per-row price: `$in/$out` per Mtok, "free", and a sale tag when the
+ *  portal reports a discounted list price. Rendered only when the provider's
+ *  payload carries pricing (Nous Portal and others that ship it). */
+function ModelPrice({ pricing }: { pricing: ModelPricing }) {
+  if (pricing.free) {
+    return <span className="shrink-0 pl-2 text-[0.625rem] text-(--ui-green)">free</span>
+  }
+
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5 pl-2 text-[0.625rem] tabular-nums text-(--ui-text-tertiary)"
+      title={`Input ${pricing.input}/Mtok · Output ${pricing.output}/Mtok`}
+    >
+      <span>
+        {pricing.input}/{pricing.output}
+      </span>
+      {pricing.discount_percent ? (
+        <span className="rounded bg-(--ui-green)/10 px-1 py-px font-medium text-(--ui-green)">
+          −{pricing.discount_percent}%
+        </span>
+      ) : null}
+    </span>
+  )
+}
 
 /** One model choice, everything a caller needs to act on a selection.
  *  `effort` is '' for "inherit the default" and 'none' for thinking off. */
@@ -636,6 +661,10 @@ export function ModelCatalogMenu({
                     const isCurrent = activeId !== null
                     const { name, tag } = modelDisplayParts(family.id)
                     const caps = group.provider.capabilities?.[family.id]
+                    // Live per-model $/Mtok pricing (Nous Portal and other
+                    // providers that ship it). The `-fast` sibling shares the
+                    // base id's price.
+                    const pricing = group.provider.pricing?.[family.id]
 
                     // Managed local model loading into memory right now:
                     // real load percent, keyed by exact model id (remote
@@ -726,6 +755,7 @@ export function ModelCatalogMenu({
                               </span>
                             </span>
                           ) : null}
+                          {pricing ? <ModelPrice pricing={pricing} /> : null}
                           {isCurrent ? (
                             <Codicon
                               className={cn('text-foreground', loadProgress ? 'ml-1' : 'ml-auto')}
