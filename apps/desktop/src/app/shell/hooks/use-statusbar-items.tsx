@@ -7,6 +7,7 @@ import { ProfileSwitcher } from '@/app/chat/sidebar/profile-dropdown-switcher'
 import type { CommandCenterSection } from '@/app/command-center'
 import { toggleTerminalPane } from '@/app/right-sidebar/terminal/reveal-focus'
 import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
+import { CompressionCountStatus } from '@/app/shell/compression-count-status'
 import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
@@ -689,6 +690,11 @@ export function useStatusbarItems({
         variant: 'menu'
       },
       {
+        hidden: contextItemHidden || currentUsage.compressions === undefined,
+        id: 'compression-count',
+        render: () => <CompressionCountStatus count={currentUsage.compressions} />
+      },
+      {
         icon: <Layers3 className="size-3" />,
         id: 'cache-hit-rate',
         // Same never-self-hide rule as the context meter: opted in means a
@@ -745,8 +751,10 @@ export function useStatusbarItems({
       contextBar,
       contextBreakdown,
       contextBreakdownLoading,
+      contextItemHidden,
       contextUsage,
       copy,
+      currentUsage.compressions,
       gaugeUsage,
       sessionStartedAt,
       gatewayState,

@@ -3962,6 +3962,7 @@ export interface Translations {
       openStarmap: string
       turnRunning: string
       contextUsage: string
+      compressions: (count: number) => string
       systemResources: {
         title: string
         loading: string
