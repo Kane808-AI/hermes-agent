@@ -86,7 +86,7 @@ import {
   toggleCronDeliveryTarget,
   validateCronEditor
 } from './cron-job-model'
-import { jobState, jobTitle, nextRunOverdueMs, STATE_DOT } from './job-state'
+import { jobState, jobTitle, nextRunOverdueMs, STATE_TONE } from './job-state'
 
 const DEFAULT_DELIVER = 'local'
 
@@ -779,7 +779,7 @@ function CronJobListRow({
   return (
     <PanelListRow
       active={active}
-      dotClassName={STATE_DOT[state] ?? 'bg-muted-foreground'}
+      dotTone={STATE_TONE[state] ?? 'muted'}
       menuItems={menuItems}
       menuLabel={menuLabel}
       onSelect={onSelect}
