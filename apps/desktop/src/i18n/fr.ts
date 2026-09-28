@@ -3236,6 +3236,13 @@ export const frOverrides = {
   },
   messaging: {
     search: 'Rechercher dans la messagerie...',
+    statusFilter: {
+      all: 'Tous',
+      bad: 'Erreurs',
+      good: 'Connectés',
+      muted: 'Inactifs',
+      warn: 'Attention requise'
+    },
     loading: 'Chargement des plateformes de messagerie...',
     loadFailed: 'Échec du chargement des plateformes de messagerie',
     states: {

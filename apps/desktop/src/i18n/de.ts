@@ -3225,6 +3225,13 @@ export const deOverrides = {
   },
   messaging: {
     search: 'Messaging durchsuchen...',
+    statusFilter: {
+      all: 'Alle',
+      bad: 'Fehler',
+      good: 'Verbunden',
+      muted: 'Inaktiv',
+      warn: 'Handlungsbedarf'
+    },
     loading: 'Messaging-Plattformen werden geladen...',
     loadFailed: 'Messaging-Plattformen konnten nicht geladen werden',
     states: {

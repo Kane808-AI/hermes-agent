@@ -2156,6 +2156,13 @@ export const zhHant = defineLocale({
 
   messaging: {
     search: '搜尋訊息平台…',
+    statusFilter: {
+      all: '全部',
+      bad: '錯誤',
+      good: '已連線',
+      muted: '未啟用',
+      warn: '需要注意'
+    },
     loading: '正在載入訊息平台…',
     loadFailed: '訊息平台載入失敗',
     states: {

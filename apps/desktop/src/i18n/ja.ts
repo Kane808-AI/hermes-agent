@@ -1913,6 +1913,13 @@ export const ja = defineLocale({
 
   messaging: {
     search: 'メッセージングを検索...',
+    statusFilter: {
+      all: 'すべて',
+      bad: 'エラー',
+      good: '接続済み',
+      muted: '非アクティブ',
+      warn: '要対応'
+    },
     loading: 'メッセージングプラットフォームを読み込み中...',
     loadFailed: 'メッセージングプラットフォームの読み込みに失敗しました',
     states: {

@@ -2063,6 +2063,13 @@ export const ru = defineLocale({
   },
   messaging: {
     search: 'Поиск в сообщениях...',
+    statusFilter: {
+      all: 'Все',
+      bad: 'Ошибки',
+      good: 'Подключено',
+      muted: 'Неактивно',
+      warn: 'Требует внимания'
+    },
     loading: 'Загрузка платформ сообщений...',
     loadFailed: 'Не удалось загрузить платформы сообщений',
     states: {
