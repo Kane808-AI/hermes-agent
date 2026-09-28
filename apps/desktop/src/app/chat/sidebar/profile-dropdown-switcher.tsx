@@ -232,9 +232,7 @@ export function ProfileSwitcher({ compact = false }: { compact?: boolean }) {
               <DropdownMenuLabel className={cn(dropdownMenuSectionLabel, 'flex items-center gap-1.5')}>
                 <ConnectionGlyph connection={group} />
                 <span className="truncate">{group.label}</span>
-                {!group.reachable && (
-                  <StatusDot tone="warn" />
-                )}
+                {!group.reachable && <StatusDot tone="warn" />}
               </DropdownMenuLabel>
               {[group.defaultAgent, ...group.named].map(agent => {
                 const localDefault = agent.connectionKind === 'local' && agent.isDefault

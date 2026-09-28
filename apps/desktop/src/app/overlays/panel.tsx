@@ -144,10 +144,8 @@ export function PanelList({
 
 interface PanelListRowProps {
   active: boolean
-  // Prefer dotTone for semantic status: the shared mark encodes tone by shape + color.
+  // Leading status mark; the shared StatusDot encodes tone by shape + color.
   dotTone?: StatusTone
-  // Raw class remains for non-semantic/custom swatches.
-  dotClassName?: string
   // Leading codicon glyph name (used when there's no lead/dot).
   icon?: string
   // Custom leading element (colored swatch, avatar, …). Wins over dot/icon.
@@ -172,7 +170,6 @@ interface PanelListRowProps {
 // the whole row also answers right-click with the same actions as its kebab.
 export function PanelListRow({
   active,
-  dotClassName,
   dotTone,
   icon,
   lead,
@@ -199,8 +196,6 @@ export function PanelListRow({
         {lead ??
           (dotTone ? (
             <StatusDot tone={dotTone} />
-          ) : dotClassName ? (
-            <span aria-hidden="true" className={cn('size-1.5 shrink-0 rounded-full', dotClassName)} />
           ) : icon ? (
             <Codicon className="shrink-0 text-muted-foreground/55" name={icon} size="0.85rem" />
           ) : null)}
@@ -358,10 +353,10 @@ export function PanelBlock({ children, className }: { children: ReactNode; class
 export type PanelPillTone = 'bad' | 'good' | 'muted' | 'warn'
 
 const PILL_TONE: Record<PanelPillTone, string> = {
-  bad: 'bg-(--ui-status-danger-soft) text-(--ui-status-danger)',
-  good: 'bg-(--ui-status-success-soft) text-(--ui-status-success)',
+  bad: 'bg-(--ui-status-danger-soft) text-(--ui-status-danger-ink)',
+  good: 'bg-(--ui-status-success-soft) text-(--ui-status-success-ink)',
   muted: 'bg-foreground/10 text-muted-foreground',
-  warn: 'bg-(--ui-status-warning-soft) text-(--ui-status-warning)'
+  warn: 'bg-(--ui-status-warning-soft) text-(--ui-status-warning-ink)'
 }
 
 export function PanelPill({ children, tone = 'muted' }: { children: ReactNode; tone?: PanelPillTone }) {

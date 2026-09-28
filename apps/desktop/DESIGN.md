@@ -153,8 +153,8 @@ renderer and Electron's first window paint.
 | `--ui-stroke-tertiary` | the default in-panel divider / list hairline — and every bordered surface in the transcript |
 | `--stroke-nous` | the overlay hairline (pairs with `shadow-nous`) |
 | `--ui-text-primary / -secondary / -tertiary` | text hierarchy |
-| `--ui-status-success / -warning / -danger` | semantic status foregrounds; use instead of framework palette names |
-| `--ui-status-*-soft` | matching low-emphasis status backgrounds for badges/pills |
+| `--ui-status-success / -warning / -danger` | semantic status fills (`StatusDot`, marks); use instead of framework palette names |
+| `--ui-status-*-soft` / `--ui-status-*-ink` | badge/pill background and the contrast-safe text that sits on it |
 | `--ui-bg-quaternary` | soft control fill (secondary button) |
 | `--ui-widget-surface-background` | fill for inline chat widgets (`WIDGET_SHELL_CLASS`) |
 | `--chrome-action-hover` | hover fill for quiet controls |
@@ -165,10 +165,10 @@ Never hardcode `border-gray-*`, `bg-white`, `text-black`, etc. The two tiles in
 (the mark needs a fixed backdrop).
 
 **Status is never color-only.** Use `StatusDot` for compact good/warn/bad/muted
-state: it encodes the tone with both shape and color (circle / diamond / square /
-hollow circle). If a surface needs richer status, pair an icon or shape with
-visible text. A hue may reinforce meaning, but it must not be the only way to
-tell states apart.
+state: each tone has its own shape as well as its color (circle / diamond /
+square / ring, from `STATUS_SHAPE_CLASS`). A custom mark that sits beside
+another state of a different hue borrows those shapes rather than inventing
+new ones. Nearby visible text stays the authority.
 
 ## Buttons — one component
 

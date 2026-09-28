@@ -25,7 +25,7 @@ import { useNavigate } from 'react-router'
 
 import type { ProfileScope } from '@/api/client'
 import { CodeEditor } from '@/components/chat/code-editor'
-import { StatusDot } from '@/components/status-dot'
+import { STATUS_SHAPE_CLASS, StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { ColorSwatches } from '@/components/ui/color-swatches'
@@ -126,12 +126,12 @@ const PROFILE_DROPDOWN_THRESHOLD = 13
 // #91710: a profile that finished (or blocked, or is still working) while
 // another was selected carries an indicator on its rail square and dropdown
 // row. The colors mirror the session status dot's palette — amber for "needs
-// your answer", accent for running, success green for unread — so a profile's
-// loudest state reads the same as its sessions' dots in the sidebar below.
+// your answer" (as a diamond), accent for running, success green for unread —
+// so a profile's loudest state reads the same as its sessions' dots below.
 const PROFILE_STATUS_DOT_CLASS: Record<ProfileDotState, string> = {
-  'needs-input': 'bg-amber-500',
-  working: 'bg-(--ui-accent)',
-  unread: 'bg-(--ui-success)'
+  'needs-input': cn(STATUS_SHAPE_CLASS.diamond, 'bg-(--ui-status-warning)'),
+  working: cn(STATUS_SHAPE_CLASS.circle, 'bg-(--ui-accent)'),
+  unread: cn(STATUS_SHAPE_CLASS.circle, 'bg-(--ui-success)')
 }
 
 /** The a11y/tooltip text for one square's summary — every non-zero count,
@@ -171,7 +171,7 @@ function ProfileStatusDot({ summary }: { summary: ProfileDotSummary }) {
   return (
     <span
       aria-hidden="true"
-      className={cn('size-1.5 rounded-full', PROFILE_STATUS_DOT_CLASS[summary.state])}
+      className={cn('size-1.5', PROFILE_STATUS_DOT_CLASS[summary.state])}
       data-slot="profile-status-dot"
     />
   )

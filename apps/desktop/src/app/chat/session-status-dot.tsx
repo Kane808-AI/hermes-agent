@@ -1,5 +1,6 @@
 import { useStore } from '@nanostores/react'
 
+import { STATUS_SHAPE_CLASS } from '@/components/status-dot'
 import { type Translations, useI18n } from '@/i18n'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -17,25 +18,30 @@ type DotVariant = {
   title?: (r: Translations['sidebar']['row']) => string
 }
 
-// Shared size for active marks; state-specific shape is part of the signal.
-const DOT_SIZE = 'size-1.5'
+// Shared base for every active dot; idle is smaller and uses its own class.
+const DOT_BASE = 'size-1.5 rounded-full'
 
-// Color is supplementary: shape + fill keep the important states distinct for
-// color-blind users. Motion on a tiny mark only says "something is happening"
-// — the row's arc already carries that signal better — so these marks stay still.
+// Three colors and one fill/hollow axis, none of it moving (needs-input alone
+// also changes shape, below). Motion on a 6px
+// circle can only say "something is happening" — which the row's arc already
+// says, better — while costing a repaint per frame on every row at once. What
+// the dot is for is telling states APART, and that is a job for color and fill:
+// filled means producing, hollow means open but quiet. The two states this
+// replaces differed by 30% opacity and were, in practice, the same dot.
 const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
-  // Amber — a clarify/approval is blocking the turn. The one "act now" color,
-  // and the only state the user is required to do something about.
+  // Amber diamond — a clarify/approval is blocking the turn. The one "act now"
+  // state, so it is also the one that changes shape: amber beside the green
+  // unread dot is the pair color-vision deficiency collapses first.
   'needs-input': {
     ariaLabel: r => r.needsInput,
-    className: `${DOT_SIZE} rotate-45 rounded-[1px] bg-(--ui-yellow)`,
+    className: cn('size-1.5', STATUS_SHAPE_CLASS.diamond, 'bg-(--ui-status-warning)'),
     role: 'status',
     title: r => r.waitingForAnswer
   },
   // Accent — the turn is running. The row's arc carries the motion.
   working: {
     ariaLabel: r => r.sessionRunning,
-    className: `${DOT_SIZE} rounded-full bg-(--ui-accent)`,
+    className: `${DOT_BASE} bg-(--ui-accent)`,
     role: 'status'
   },
   // Hollow accent — still authoritatively running, but nothing has arrived for
@@ -43,7 +49,7 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
   // because nothing is coming out of it right now.
   stalled: {
     ariaLabel: r => r.sessionRunning,
-    className: `${DOT_SIZE} rounded-full border border-(--ui-accent)`,
+    className: `${DOT_BASE} border border-(--ui-accent)`,
     role: 'status',
     title: r => r.sessionRunning
   },
@@ -52,7 +58,7 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
   // filled grey dot read as finished, the opposite of what this means.
   background: {
     ariaLabel: r => r.backgroundRunning,
-    className: `${DOT_SIZE} rounded-[1px] border border-(--ui-text-tertiary)`,
+    className: `${DOT_BASE} border border-(--ui-text-tertiary)`,
     role: 'status',
     title: r => r.backgroundRunning
   },
@@ -62,7 +68,7 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
   // they don't belong to. Under a green accent it stays emerald.
   unread: {
     ariaLabel: r => r.finishedUnread,
-    className: `${DOT_SIZE} rounded-[1px] bg-(--ui-success)`,
+    className: `${DOT_BASE} bg-(--ui-success)`,
     role: 'status',
     title: r => r.finishedUnread
   },
@@ -72,7 +78,7 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
   // has yet to do anything at all.
   draft: {
     ariaLabel: r => r.draftSession,
-    className: `${DOT_SIZE} rounded-full border border-(--ui-text-quaternary)`,
+    className: `${DOT_BASE} border border-(--ui-text-quaternary)`,
     title: r => r.draftSession
   },
   // Settled: the project color when there is one, else the faintest filled

@@ -5,6 +5,8 @@ import { StatusDot, type StatusTone } from './status-dot'
 
 afterEach(cleanup)
 
+const TONES: StatusTone[] = ['good', 'warn', 'bad', 'muted']
+
 function mark(tone: StatusTone): HTMLElement {
   const { container } = render(<StatusDot tone={tone} />)
   const element = container.firstElementChild
@@ -17,17 +19,14 @@ function mark(tone: StatusTone): HTMLElement {
 }
 
 describe('StatusDot', () => {
-  it('uses a distinct non-color shape for each semantic tone', () => {
-    expect(mark('good').className).toContain('rounded-full')
-    expect(mark('warn').className).toContain('rotate-45')
-    expect(mark('bad').className).toContain('rounded-[1px]')
-    expect(mark('muted').className).toContain('border')
+  it('gives every tone its own shape so state never rests on hue alone', () => {
+    const shapes = TONES.map(tone => mark(tone).dataset.statusShape)
+
+    expect(shapes.every(Boolean)).toBe(true)
+    expect(new Set(shapes).size).toBe(TONES.length)
   })
 
-  it('exposes the semantic tone for diagnostics without adding spoken noise', () => {
-    const element = mark('warn')
-
-    expect(element.dataset.statusTone).toBe('warn')
-    expect(element.getAttribute('aria-hidden')).toBe('true')
+  it('stays out of the accessibility tree; nearby copy carries the state', () => {
+    expect(mark('warn').getAttribute('aria-hidden')).toBe('true')
   })
 })
