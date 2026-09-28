@@ -660,6 +660,8 @@ class TestLaunchdServiceRecovery:
 
         def fake_run(cmd, check=False, **kwargs):
             run_calls.append(cmd)
+            if cmd[:2] == ["launchctl", "print"]:
+                return SimpleNamespace(returncode=113, stdout="", stderr="")
             if cmd[:2] == ["launchctl", "list"]:
                 # Post-bootstrap launchd reports a supervised PID; without one
                 # the success check correctly refuses to stop retrying.
@@ -2567,6 +2569,8 @@ class TestRetryLaunchctlBootstrapUntilRegistered:
         list_results = iter([1, 0])  # first check: not registered, second: registered
 
         def fake_run(cmd, check=False, **kwargs):
+            if cmd[:2] == ["launchctl", "print"]:
+                return SimpleNamespace(returncode=113, stdout="", stderr="")
             if cmd[:2] == ["launchctl", "list"]:
                 rc = next(list_results)
                 return SimpleNamespace(
@@ -2591,6 +2595,8 @@ class TestRetryLaunchctlBootstrapUntilRegistered:
         attempts = {"bootstrap": 0}
 
         def fake_run(cmd, check=False, **kwargs):
+            if cmd[:2] == ["launchctl", "print"]:
+                return SimpleNamespace(returncode=113, stdout="", stderr="")
             if cmd[1] == "bootstrap":
                 attempts["bootstrap"] += 1
                 if attempts["bootstrap"] == 1:
@@ -2626,6 +2632,8 @@ class TestRetryLaunchctlBootstrapUntilRegistered:
         list_calls = {"n": 0}
 
         def fake_run(cmd, check=False, **kwargs):
+            if cmd[:2] == ["launchctl", "print"]:
+                return SimpleNamespace(returncode=113, stdout="", stderr="")
             if cmd[:2] == ["launchctl", "list"]:
                 list_calls["n"] += 1
                 # Registered (exit 0) but no PID line — never running.

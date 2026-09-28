@@ -383,9 +383,9 @@ class TestRestartMacosLaunchdGateways:
     ):
         """macOS-26 quirk: a label can be `launchctl list`-registered while
         both explicit gui/user `launchctl print` probes fail (domain doesn't
-        support service management). The gate must use the registered
-        predicate and hand off to launchd_restart(), which owns the
-        domain-unsupported fallback — locate is for siblings only."""
+        support service management). A failed domain lookup for the old PID
+        must not prevent handoff to launchd_restart(), which owns the
+        domain-unsupported fallback."""
         current = "ai.hermes.gateway"
         rec = _fleet(
             monkeypatch,
@@ -401,7 +401,6 @@ class TestRestartMacosLaunchdGateways:
         _restart_macos_launchd_gateways(restarted, failed, drain_budget=0.0)
 
         assert rec.current_restarts == [current]
-        assert current not in rec.locates
         assert restarted == [current]
         assert failed == []
 

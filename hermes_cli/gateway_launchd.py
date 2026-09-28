@@ -138,18 +138,30 @@ def _launchd_reload_budget() -> float:
     return max(30.0, _gw()._get_restart_drain_timeout())
 
 
-def _launchctl_supervised_pid(label: str) -> int | None:
-    """PID launchd currently runs for ``label``, or None when it runs none. ``launchctl list`` exits 0 for
-    a mere registered definition (``state = not running`` on macOS 26+), so a PID — not the exit code — is
-    the answer. Domain-agnostic on purpose: ``launchctl print`` domain probes fail on macOS-26 per-user
-    domains, which is why the invoking profile verifies through this and not ``_launchd_print_service_pid``."""
+def _launchctl_service_state(label: str) -> tuple[bool, int | None]:
+    """Registration and supervised PID, independent of the caller's bootstrap namespace.
+
+    Explicit GUI/user domains win, including a registered job with no process.
+    Retain the legacy list fallback for hosts where neither domain is available.
+    """
+    try:
+        domain, pid = _gw()._locate_launchd_gateway_service(label)
+        if domain is not None:
+            return True, pid
+    except (subprocess.TimeoutExpired, OSError):
+        return False, None
     try:
         result = subprocess.run(["launchctl", "list", label], check=False, timeout=10, **_gw()._CAPTURE_TEXT)
     except (subprocess.TimeoutExpired, OSError):
-        return None
+        return False, None
     if result.returncode != 0:
-        return None
-    return _gw()._parse_launchd_pid_from_list_output(result.stdout)
+        return False, None
+    return True, _gw()._parse_launchd_pid_from_list_output(result.stdout)
+
+
+def _launchctl_supervised_pid(label: str) -> int | None:
+    """PID launchd runs for ``label``; registration alone does not prove liveness."""
+    return _launchctl_service_state(label)[1]
 
 
 def _launchctl_label_supervising_process(label: str) -> bool:
@@ -890,16 +902,7 @@ def wait_for_launchd_gateway_supervision(
 def launchd_status(deep: bool = False):
     plist_path = _gw().get_launchd_plist_path()
     label = _gw().get_launchd_label()
-    try:
-        result = subprocess.run(["launchctl", "list", label], timeout=10, **_gw()._CAPTURE_TEXT)
-        service_listed = result.returncode == 0
-        list_output = result.stdout
-    except subprocess.TimeoutExpired:
-        service_listed = False
-        list_output = ""
-
-    # `launchctl list` exits 0 for any registered definition (even `state = not running`); only a PID proves a process.
-    launchd_pid = _gw()._parse_launchd_pid_from_list_output(list_output) if service_listed else None
+    service_listed, launchd_pid = _launchctl_service_state(label)
 
     # Hermes PID may be a detached fallback process; when launchd IS supervising both PIDs match — don't double-count.
     from gateway.status import get_running_pid
@@ -940,7 +943,7 @@ def launchd_status(deep: bool = False):
         print("  ⚠ Auto-start at login and auto-restart on crash are NOT available.")
     else:
         print("✓ Gateway service is registered with launchd")
-        print(list_output)
+        print("  launchd is not supervising a process for this service.")
         if fallback_pid:
             print(f"  Detached gateway process is running (PID {fallback_pid})")
 

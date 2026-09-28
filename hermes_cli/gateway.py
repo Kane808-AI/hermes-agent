@@ -4808,10 +4808,7 @@ def _is_service_running() -> bool:
     if supports_systemd_services():
         return _systemd_unit_is_active(False) or _systemd_unit_is_active(True)
     if is_macos() and get_launchd_plist_path().exists():
-        try:
-            return _launchd_service_registered(get_launchd_label(), timeout=10)
-        except subprocess.TimeoutExpired:
-            return False
+        return _launchctl_label_supervising_process(get_launchd_label())
     # Windows "installed" doesn't mean "running"; like manual runs, a live gateway process decides.
     return len(find_gateway_pids()) > 0
 
@@ -5745,4 +5742,3 @@ def _pm_runtime_venv_dir(project_root: Path | None = None) -> Path | None:
 
     venv = selected_venv(root)  # a malformed committed selection raises: fail closed
     return venv if venv.is_dir() else None
-
