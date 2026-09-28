@@ -1845,11 +1845,6 @@ export const ja = defineLocale({
     mcpServers: 'MCP サーバー',
     archivedChats: 'アーカイブ済みチャット',
     sections: { sessions: 'セッション', system: 'システム', usage: '使用状況' },
-    sectionDescriptions: {
-      sessions: 'セッションの検索と管理',
-      system: 'ステータス、ログ、システムアクション',
-      usage: 'トークン、コスト、スキルの活動履歴'
-    },
     nav: {
       newChat: { title: '新しいセッション', detail: '新しいセッションを開始' },
       settings: { title: '設定', detail: 'Hermes デスクトップを設定' },
@@ -1890,6 +1885,7 @@ export const ja = defineLocale({
     actionStartedWaiting: 'アクションが開始されました。ステータスを待機中...',
     loadingStatus: 'ステータスを読み込み中...',
     recentLogs: '最近のログ',
+    logSearchPlaceholder: 'ログ行を検索…',
     noLogs: 'ログはまだ読み込まれていません。',
     days: count => `${count}日`,
     statSessions: 'セッション',
@@ -4212,6 +4208,11 @@ export const ja = defineLocale({
   ui: {
     search: {
       clear: '検索をクリア'
+    },
+    logs: {
+      bottom: 'ログの末尾',
+      search: 'ログを検索…',
+      top: 'ログの先頭'
     },
     pagination: {
       label: 'ページング',

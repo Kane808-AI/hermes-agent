@@ -3085,12 +3085,6 @@ export const deOverrides = {
       system: 'System',
       usage: 'Nutzung'
     },
-    sectionDescriptions: {
-      maintenance: 'Diagnose, Backups, Curator und Memory-Daten',
-      sessions: 'Sessions durchsuchen und verwalten',
-      system: 'Status, Logs und Systemaktionen',
-      usage: 'Token-, Kosten- und Skill-Aktivität im Zeitverlauf'
-    },
     nav: {
       newChat: {
         title: 'Neue Session',
@@ -3176,7 +3170,7 @@ export const deOverrides = {
     actions: count => `${count} Aktionen`,
     logFile: 'Logdatei',
     logLevel: 'Stufe',
-    logSearchPlaceholder: 'Logzeilen filtern...',
+    logSearchPlaceholder: 'Logs durchsuchen…',
     maintenance: {
       runOps: 'Diagnose',
       doctor: 'Doctor ausführen',
@@ -6106,6 +6100,11 @@ export const deOverrides = {
   ui: {
     search: {
       clear: 'Suche löschen'
+    },
+    logs: {
+      bottom: 'Zum Ende',
+      search: 'Logs durchsuchen…',
+      top: 'Zum Anfang'
     },
     pagination: {
       label: 'Seitennummerierung',

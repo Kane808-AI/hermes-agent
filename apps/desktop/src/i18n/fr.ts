@@ -3096,12 +3096,6 @@ export const frOverrides = {
       system: 'Système',
       usage: 'Utilisation'
     },
-    sectionDescriptions: {
-      maintenance: 'Diagnostiques, sauvegardes, curateur et données de mémoire',
-      sessions: 'Rechercher et gérer les sessions',
-      system: 'État, journaux et actions système',
-      usage: 'Activité des jetons, coûts et skills au fil du temps'
-    },
     nav: {
       newChat: {
         title: 'Nouvelle session',
@@ -3187,7 +3181,7 @@ export const frOverrides = {
     actions: count => `${count} actions`,
     logFile: 'Fichier journal',
     logLevel: 'Niveau',
-    logSearchPlaceholder: 'Filtrer les lignes du journal...',
+    logSearchPlaceholder: 'Rechercher dans les journaux…',
     maintenance: {
       runOps: 'Diagnostiques',
       doctor: 'Exécuter le diagnostic',
@@ -6117,6 +6111,11 @@ export const frOverrides = {
   ui: {
     search: {
       clear: 'Effacer la recherche'
+    },
+    logs: {
+      bottom: 'Aller à la fin',
+      search: 'Rechercher dans les journaux…',
+      top: 'Aller au début'
     },
     pagination: {
       label: 'pagination',
