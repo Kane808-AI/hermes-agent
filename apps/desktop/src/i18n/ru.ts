@@ -3568,7 +3568,11 @@ export const ru = defineLocale({
       editModels: 'Изменить модели…',
       followDefault: 'Использовать модель по умолчанию из настроек',
       refreshModels: 'Обновить модели',
-      fast: 'Быстрая'
+      fast: 'Быстрая',
+      free: 'бесплатно',
+      cacheRead: 'чтение из кэша',
+      priceTitle: (input: string, output: string, cache: string) =>
+        `Вход ${input}/Mtok · Выход ${output}/Mtok` + (cache ? ` · Чтение из кэша ${cache}/Mtok` : '')
     },
     modelOptions: {
       noOptions: 'Для этой модели нет опций',

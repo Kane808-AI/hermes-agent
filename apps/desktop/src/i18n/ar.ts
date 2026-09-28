@@ -2891,7 +2891,11 @@ export const ar = defineLocale({
       editModels: 'تحرير النماذج',
       followDefault: 'استخدام الافتراضي من الإعدادات',
       refreshModels: 'تحديث النماذج',
-      fast: 'سريع'
+      fast: 'سريع',
+      free: 'مجاني',
+      cacheRead: 'قراءة من الذاكرة المؤقتة',
+      priceTitle: (input: string, output: string, cache: string) =>
+        `الإدخال ${input}/Mtok · الإخراج ${output}/Mtok` + (cache ? ` · قراءة من الذاكرة المؤقتة ${cache}/Mtok` : '')
     },
     modelOptions: {
       noOptions: 'لا توجد خيارات لهذا النموذج',

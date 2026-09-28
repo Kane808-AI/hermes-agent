@@ -3339,7 +3339,11 @@ export const ja = defineLocale({
       editModels: 'モデルを編集…',
       followDefault: '設定のデフォルトを使用',
       refreshModels: 'モデルを更新',
-      fast: '高速'
+      fast: '高速',
+      free: '無料',
+      cacheRead: 'キャッシュ読み取り',
+      priceTitle: (input: string, output: string, cache: string) =>
+        `入力 ${input}/Mtok · 出力 ${output}/Mtok` + (cache ? ` · キャッシュ読み取り ${cache}/Mtok` : '')
     },
     modelOptions: {
       noOptions: 'このモデルにはオプションがありません',

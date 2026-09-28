@@ -422,6 +422,57 @@ describe('the catalog renders per-model pricing', () => {
     await screen.findByText('free')
   })
 
+  it('appends the cached-read rate next to the uncached input/output prices', async () => {
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          models: ['anthropic/claude-sonnet-5'],
+          name: 'Nous Portal',
+          slug: 'nous',
+          pricing: {
+            'anthropic/claude-sonnet-5': {
+              input: '$1.60',
+              output: '$8.00',
+              cache: '$0.16',
+              free: false
+            }
+          }
+        }
+      ]
+    })
+
+    renderMenu()
+
+    const prices = await screen.findByText('$1.60/$8.00')
+    expect(prices.parentElement?.textContent).toContain('·$0.16')
+    // The cached rate carries its own hover label naming it.
+    expect(screen.getByTitle('cached read $0.16/Mtok')).not.toBeNull()
+  })
+
+  it('prices a collapsed -fast family from the fast sibling when the base id is unpriced', async () => {
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          models: ['anthropic/claude-sonnet-5', 'anthropic/claude-sonnet-5-fast'],
+          name: 'Nous Portal',
+          slug: 'nous',
+          pricing: {
+            'anthropic/claude-sonnet-5-fast': {
+              input: '$0.80',
+              output: '$4.00',
+              cache: null,
+              free: false
+            }
+          }
+        }
+      ]
+    })
+
+    renderMenu()
+
+    await screen.findByText('$0.80/$4.00')
+  })
+
   it('renders no price span when the provider carries no pricing for the model', async () => {
     getGlobalModelOptions.mockResolvedValue({
       providers: [

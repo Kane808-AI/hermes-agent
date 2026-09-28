@@ -4986,7 +4986,11 @@ export const esOverrides = {
       editModels: 'Editar modelos…',
       followDefault: 'Usar el predeterminado de Ajustes',
       refreshModels: 'Actualizar modelos',
-      fast: 'Rápido'
+      fast: 'Rápido',
+      free: 'gratis',
+      cacheRead: 'lectura en caché',
+      priceTitle: (input: string, output: string, cache: string) =>
+        `Entrada ${input}/Mtok · Salida ${output}/Mtok` + (cache ? ` · Lectura en caché ${cache}/Mtok` : '')
     },
     modelOptions: {
       noOptions: 'No hay opciones para este modelo',

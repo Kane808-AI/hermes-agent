@@ -4996,7 +4996,11 @@ export const deOverrides = {
       editModels: 'Modelle bearbeiten…',
       followDefault: 'Standard aus den Einstellungen verwenden',
       refreshModels: 'Modelle aktualisieren',
-      fast: 'Schnell'
+      fast: 'Schnell',
+      free: 'kostenlos',
+      cacheRead: 'Cache-Lesung',
+      priceTitle: (input: string, output: string, cache: string) =>
+        `Eingabe ${input}/Mtok · Ausgabe ${output}/Mtok` + (cache ? ` · Cache-Lesung ${cache}/Mtok` : '')
     },
     modelOptions: {
       noOptions: 'Keine Optionen für dieses Modell',

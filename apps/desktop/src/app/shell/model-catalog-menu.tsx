@@ -67,17 +67,26 @@ import { type FastControl, ModelEditSubmenu, resolveFastControl } from './model-
 // items preventDefault on select).
 export const ModelMenuCloseContext = createContext<() => void>(() => {})
 
-/** Compact per-row price: `$in/$out` per Mtok, "free", and a sale tag when the
- *  portal reports a discounted list price. Rendered only when the provider's
- *  payload carries pricing (Nous Portal and others that ship it). */
+/** Compact per-row price: `$in/$out` per Mtok (cached read appended when the
+ *  provider ships it), "free", and a sale tag when the portal reports a
+ *  discounted list price. Rendered only when the provider's payload carries
+ *  pricing (Nous Portal and others that ship it). */
 function ModelPrice({ pricing }: { pricing: ModelPricing }) {
+  const { t } = useI18n()
+  const copy = t.shell.modelMenu
   // Partial payloads: `_apply_pricing` ships "" for unknown, but a provider
   // can report null — render nothing rather than "null/null" or "—/—".
   const input = pricing.input || null
   const output = pricing.output || null
+  // Cached-input rate (`cache`, from the backend's `input_cache_read`); the
+  // inline `input` rate is the uncached read, so together they cover the
+  // cached-vs-uncached comparison without a tooltip round-trip (#63125).
+  const cache = pricing.cache || null
+
   if (pricing.free) {
-    return <span className="shrink-0 pl-2 text-[0.625rem] text-(--ui-green)">free</span>
+    return <span className="shrink-0 pl-2 text-[0.625rem] text-(--ui-green)">{copy.free}</span>
   }
+
   if (!input && !output) {
     return null
   }
@@ -89,11 +98,16 @@ function ModelPrice({ pricing }: { pricing: ModelPricing }) {
   return (
     <span
       className="flex shrink-0 items-center gap-1.5 pl-2 text-[0.625rem] tabular-nums text-(--ui-text-tertiary)"
-      title={`Input ${input ?? '—'}/Mtok · Output ${output ?? '—'}/Mtok`}
+      title={copy.priceTitle(input ?? '—', output ?? '—', cache ?? '')}
     >
       <span>
         {input ?? '—'}/{output ?? '—'}
       </span>
+      {cache ? (
+        <span className="text-(--ui-text-quaternary)" title={`${copy.cacheRead} ${cache}/Mtok`}>
+          ·{cache}
+        </span>
+      ) : null}
       {discount ? (
         <span className="rounded bg-(--ui-green)/10 px-1 py-px font-medium text-(--ui-green)">
           −{discount}%
@@ -672,10 +686,14 @@ export function ModelCatalogMenu({
                     const isCurrent = activeId !== null
                     const { name, tag } = modelDisplayParts(family.id)
                     const caps = group.provider.capabilities?.[family.id]
+
                     // Live per-model $/Mtok pricing (Nous Portal and other
-                    // providers that ship it). The `-fast` sibling shares the
-                    // base id's price.
-                    const pricing = group.provider.pricing?.[family.id]
+                    // providers that ship it). A `-fast` sibling shares the
+                    // base id's price: the collapsed row fronts the base, so
+                    // fall back to it when only the fast variant is unpriced.
+                    const pricing =
+                      group.provider.pricing?.[family.id] ??
+                      (family.fastId ? group.provider.pricing?.[family.fastId] : undefined)
 
                     // Managed local model loading into memory right now:
                     // real load percent, keyed by exact model id (remote
