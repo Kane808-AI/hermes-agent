@@ -60,6 +60,37 @@ class UpdatePlan:
         return plan
 
 
+def _service_owns_pid(pid: int, service_pids: set[int]) -> bool:
+    """True when *pid* is a service root or one of its descendants.
+
+    launchd may report the plist's outer ``osascript`` process while the live gateway is a
+    grandchild (``osascript -> stderr_timestamp -> gateway run``).  Treating only the reported PID
+    as supervised misclassifies that gateway as manual and makes the updater fight launchd.
+    """
+    if pid in service_pids:
+        return True
+    if not service_pids:
+        return False
+    with suppress(Exception):
+        from hermes_cli.gateway import _get_parent_pid
+
+        current = pid
+        seen: set[int] = set()
+        # A normal service chain is only a few processes deep.  The bound also makes malformed or
+        # recycled parent data fail closed instead of walking indefinitely.
+        for _ in range(32):
+            if current <= 1 or current in seen:
+                break
+            seen.add(current)
+            parent = _get_parent_pid(current)
+            if parent is None:
+                break
+            if parent in service_pids:
+                return True
+            current = parent
+    return False
+
+
 def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids: set | None = None) -> str:
     """Classify how a live gateway PID is supervised."""
     if windows_service_pids and pid in windows_service_pids:
@@ -67,7 +98,7 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids
         # instead of killing the child, so reconciliation must plan it under its own mechanism id.
         # See #91277.
         return "windows-service"
-    if pid not in service_pids:
+    if not _service_owns_pid(pid, service_pids):
         return "manual"
     with suppress(Exception):
         from hermes_cli.gateway import is_macos, supports_systemd_services

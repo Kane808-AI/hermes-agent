@@ -7,6 +7,8 @@ Pins:
   rows — the silent-miss tripwire.
 """
 
+import pytest
+
 from hermes_cli.update_inventory import (
     RuntimeRecord,
     UpdatePlan,
@@ -48,6 +50,45 @@ def test_windows_service_supervisor_classification():
     # Without SCM ownership the existing classification is untouched.
     assert _detect_supervisor_for_pid(42, set(), set()) == "manual"
     assert _detect_supervisor_for_pid(42, set(), None) == "manual"
+
+
+def test_service_ownership_follows_bounded_parent_chain(monkeypatch):
+    from hermes_cli import gateway
+    from hermes_cli.update_inventory import _service_owns_pid
+
+    parents = {103: 102, 102: 101, 101: 1}
+    monkeypatch.setattr(gateway, "_get_parent_pid", lambda pid: parents.get(pid))
+    assert _service_owns_pid(101, {101})
+    assert _service_owns_pid(103, {101})
+    assert not _service_owns_pid(203, {101})
+
+    # Malformed ancestry fails closed: neither a cycle nor an excessive chain can loop forever or
+    # manufacture service ownership.
+    monkeypatch.setattr(gateway, "_get_parent_pid", lambda pid: {301: 302, 302: 301}.get(pid))
+    assert not _service_owns_pid(301, {101})
+    long_chain = {pid: pid - 1 for pid in range(401, 434)}
+    monkeypatch.setattr(gateway, "_get_parent_pid", lambda pid: long_chain.get(pid))
+    assert not _service_owns_pid(433, {400})
+
+    def unavailable(_pid):
+        raise OSError("process table unavailable")
+
+    monkeypatch.setattr(gateway, "_get_parent_pid", unavailable)
+    assert not _service_owns_pid(103, {101})
+
+
+@pytest.mark.platforms("macos")
+def test_launchd_wrapper_descendant_classifies_as_launchd(monkeypatch):
+    """launchd owns the gateway even when its reported PID is an outer wrapper."""
+    from hermes_cli import gateway
+    from hermes_cli.update_inventory import _detect_supervisor_for_pid
+
+    parents = {103: 102, 102: 101, 101: 1}
+    monkeypatch.setattr(gateway, "_get_parent_pid", lambda pid: parents.get(pid))
+
+    # launchd reports 101 (osascript); the inventory observes 103 (gateway run).
+    assert _detect_supervisor_for_pid(103, {101}) == "launchd"
+    assert _detect_supervisor_for_pid(203, {101}) == "manual"
 
 
 def test_windows_service_runtime_reconciles_via_service_profiles():
