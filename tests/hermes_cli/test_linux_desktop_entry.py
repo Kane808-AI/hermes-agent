@@ -494,7 +494,7 @@ def test_exec_skips_managed_environment_cli_without_desktop(
     generation = installs / install_key(root) / "environments" / "gen"
     workspace = generation / "workspace"
     workspace.mkdir(parents=True)
-    managed = generation / "bin" / "hermes"
+    managed = generation / "venv" / "bin" / "hermes"
     managed.parent.mkdir(parents=True)
     managed.write_text("#!/usr/bin/env bash\nexec true\n", encoding="utf-8")
     managed.chmod(0o755)
