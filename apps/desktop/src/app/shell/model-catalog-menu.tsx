@@ -71,21 +71,32 @@ export const ModelMenuCloseContext = createContext<() => void>(() => {})
  *  portal reports a discounted list price. Rendered only when the provider's
  *  payload carries pricing (Nous Portal and others that ship it). */
 function ModelPrice({ pricing }: { pricing: ModelPricing }) {
+  // Partial payloads: `_apply_pricing` ships "" for unknown, but a provider
+  // can report null — render nothing rather than "null/null" or "—/—".
+  const input = pricing.input || null
+  const output = pricing.output || null
   if (pricing.free) {
     return <span className="shrink-0 pl-2 text-[0.625rem] text-(--ui-green)">free</span>
   }
+  if (!input && !output) {
+    return null
+  }
+
+  const discount = typeof pricing.discount_percent === 'number' && pricing.discount_percent > 0
+    ? pricing.discount_percent
+    : null
 
   return (
     <span
       className="flex shrink-0 items-center gap-1.5 pl-2 text-[0.625rem] tabular-nums text-(--ui-text-tertiary)"
-      title={`Input ${pricing.input}/Mtok · Output ${pricing.output}/Mtok`}
+      title={`Input ${input ?? '—'}/Mtok · Output ${output ?? '—'}/Mtok`}
     >
       <span>
-        {pricing.input}/{pricing.output}
+        {input ?? '—'}/{output ?? '—'}
       </span>
-      {pricing.discount_percent ? (
+      {discount ? (
         <span className="rounded bg-(--ui-green)/10 px-1 py-px font-medium text-(--ui-green)">
-          −{pricing.discount_percent}%
+          −{discount}%
         </span>
       ) : null}
     </span>

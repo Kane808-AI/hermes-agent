@@ -421,4 +421,25 @@ describe('the catalog renders per-model pricing', () => {
 
     await screen.findByText('free')
   })
+
+  it('renders no price span when the provider carries no pricing for the model', async () => {
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [
+        {
+          models: ['anthropic/claude-sonnet-5'],
+          name: 'Nous Portal',
+          slug: 'nous'
+        }
+      ]
+    })
+
+    renderMenu()
+
+    // modelDisplayParts prettifies to the bare family name (vendor lives on
+    // the provider group row), so the row reads "Sonnet 5", not "Claude
+    // Sonnet 5".
+    await screen.findByText('Sonnet 5')
+    expect(screen.queryByText(/\/Mtok/)).toBeNull()
+    expect(screen.queryByText('free')).toBeNull()
+  })
 })
