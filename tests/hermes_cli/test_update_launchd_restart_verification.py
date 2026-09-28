@@ -266,6 +266,8 @@ class TestInvokingProfileIsVerifiedLikeItsSiblings:
         listings = []
 
         def fake_launchctl(argv, **kwargs):
+            if argv[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(argv, 113, stdout="", stderr="")
             assert argv[:2] == ["launchctl", "list"]
             listings.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout='\t"PID" = 4242;\n', stderr="")
