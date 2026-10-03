@@ -2634,8 +2634,9 @@ class _CompactionLifecycle:
 
 class _CompressionLease:
     """The per-attempt durable compression lock plus its lifecycle plumbing.
-    ``holder`` is None when no durable lock is owned (legacy DB, no session db); ``watermark`` is MAX(id) of
-    active rows at lease start (None = archive everything, no concurrent-tail preservation this cycle)."""
+    ``holder`` is None when no durable lock is owned (legacy DB, no session db); ``watermark`` is the highest
+    active row the compaction already represents: MAX(id) at lease start, advanced to the newest row of an
+    adopted durable snapshot (None = archive everything, no concurrent-tail preservation this cycle)."""
 
     def __init__(
         self, agent: Any, *, db: Any, sid: str, ttl: float, refresh_interval: Any,
@@ -2921,7 +2922,8 @@ def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: 
     """Return the durable parent transcript when it outgrew the in-memory snapshot.
     Rotation only (in-place never loses rows). The snapshot predates the lease: if durable grew, a writer
     committed a turn — ADOPT it (aborting wedged busy sessions forever). Length check only: in-memory edits of
-    past turns are legal."""
+    past turns are legal. Adoption advances ``lease.watermark`` to the snapshot's newest row, so publication
+    clones only rows the snapshot does not already carry."""
     if lease.db is None or not lease.sid:
         return None
     durable_loader = getattr(type(lease.db), "get_messages_as_conversation", None)
@@ -2954,9 +2956,12 @@ def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: 
         )
         return None
     # Re-read after the flush so the adopted snapshot carries the just-persisted tail.
-    durable_parent = durable_loader(lease.db, lease.sid)
+    durable_parent = durable_loader(lease.db, lease.sid, include_row_ids=True)
     if not (isinstance(durable_parent, list) and len(durable_parent) > len(messages)):
         return None
+    adopted_row_ids = [rid for m in durable_parent if isinstance(rid := m.pop("_row_id", None), int)]
+    if lease.watermark is not None and adopted_row_ids:
+        lease.watermark = max(lease.watermark, *adopted_row_ids)
     logger.info(
         "compression: session=%s grew before lease (%d → %d msgs); adopting durable snapshot", lease.sid, len(messages),
         len(durable_parent),
@@ -3357,7 +3362,8 @@ def _publish_rotated_compaction(
     if _parent_deliberately_ended(agent._session_db, old_session_id):
         raise RuntimeError(f"Compression parent already ended: {old_session_id}")
     # Foreign-tail ceiling: the flush below writes OUR rows (already in handoff);
-    # rows above the start watermark up to this MAX(id) are foreign appends.
+    # rows above the lease watermark (lease start, or the newest adopted-snapshot row) up to this MAX(id)
+    # are foreign appends.
     # No trustworthy ceiling means the clone could duplicate the handoff: skip tail preservation this rotation.
     _foreign_tail_ceiling = None
     with contextlib.suppress(Exception):
