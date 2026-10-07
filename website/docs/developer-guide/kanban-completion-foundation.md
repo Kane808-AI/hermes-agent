@@ -248,6 +248,34 @@ and exact commands are in the saga receipt. `python scripts/check` passed all **
 with **0 code-health blockers and 0 advisories**. Both unstaged and staged whitespace checks
 passed. No Phase 2 run encountered the historical WAL-preflight race.
 
-Consumers remain disabled and activation remains refused. Phase 2 is ready for independent
-review. No Phase 3 work, live database migration, service restart, production configuration
+Consumers remain disabled and activation remains refused. The initial Phase 2 implementation
+was submitted for independent review, which was not approved. No Phase 3 work, live database migration, service restart, production configuration
 change, push, or merge occurred.
+
+
+### Phase 2 blocking-review follow-up
+
+Follow-up implementation: `fd51556f4b94dc0e264a41520ffc6ad23ea03cd2`, starting from reviewed HEAD
+`1693719b355349600f12cfff3018d7eb0b7ebcd7` on `feat/completion-inbox-phase01`.
+
+Publication, tool-plan admission, and effects now require a nonempty current session-turn
+holder. Native dispatch requires its bound agent and admitted lease. A new mutation must
+match its exact durable sanitized tool-plan slot. Matching committed keys replay once under
+live authority. The explicit silent scope suppresses callbacks, stdout/stderr, inherited
+worker failure output, metrics, titles, trajectories, request dumps, finalizer effects,
+spill storage, remote output writes, automatic fallback, and prompt reconstruction. It
+retains ordinary native lease and transcript guards. No response is delivered to a surface.
+
+The original 146-test foundation/saga command now passes **178 tests**, including 32 new
+review cases. The isolated affected suite passes **190 tests with 1 skip**, and 10 additional
+observer/provider files pass **255 tests**. Candidate and clean approved base both return
+**284 passed, 17 failed, 1 skipped, 10 strict xfailed** on the documented 26-file command.
+Exact failing IDs and normalized assertion causes match. No new failure or WAL-preflight
+race occurred. All **11 checks pass**, and unstaged/staged whitespace checks pass.
+The [saga receipt](kanban-completion-inbox-saga.md#review-follow-up-verification-receipt)
+records exact commands, focused red evidence, file changes, and remaining limitations.
+
+Phase 2 remains subject to independent review. All consumers remain disabled and activation
+is refused. No Phase 3 work, surface delivery, live migration, service restart, production
+configuration change, JEV, hosted egress, gateway fallback, historical replay, push, or merge
+occurred. Database execution used only disposable test stores.

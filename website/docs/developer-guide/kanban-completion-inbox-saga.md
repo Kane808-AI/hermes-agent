@@ -4,8 +4,9 @@ title: Kanban Completion Inbox saga
 
 Implementation scope: Phase 2 of plan `plan-0045009c16e345dd`, starting from
 `4500a0f640f2d15a22e694435cc7a061586c35a5` on `feat/completion-inbox-phase01`.
-Implementation revision: `29b19d1ffbdbfae866729cf03ee63d6720493cc3`.
-The subsequent documentation-only commit records this exact revision in both receipts.
+Initial implementation revision: `29b19d1ffbdbfae866729cf03ee63d6720493cc3`.
+Independent review of Phase 2 is not approved. The follow-up below fixes its two blocking
+findings and remains subject to independent review before any later phase.
 This is an explicit native seam. No consumer is started or enabled.
 
 ## Durable identities and authority
@@ -54,12 +55,19 @@ rows are neither relabelled nor rewritten, and the cached system prompt is reuse
 the owning store, exact marker history, existing cached system prompt, native chat completion
 runtime, and ordinary session-turn admission. Automatic compression, memory effects,
 micro-compaction, background review, custom context engines, MoA, and registered plugin
-hooks/middleware are refused. Lifecycle observers, MCP refresh, and automatic title
-generation are suppressed inside this explicit scope.
+hooks/middleware are refused. The completion-only native seam retains admission, renewal,
+release, and transcript guards while omitting ordinary surface/Relay/metrics scopes.
+Automatic fallback and agents already on fallback are refused. Existing full prompt bytes
+are reused without reconstructing missing static tiers. Lifecycle observers, MCP refresh,
+and every automatic title path are suppressed inside this explicit scope.
 
 Tool-loop transcript output stays staged. Before a permitted mutation, the profile
 transaction records the ordered safe tool plan and verifies current consumer and turn
-authority. Terminal publication commits fresh staged transcript rows, the assistant response,
+authority. Publication, plan admission, and effects always require a nonempty, current
+session-turn holder in their write transaction. Dispatch and flush also require the bound
+native agent and its admitted holder. A new mutation requires the exact sanitized fingerprint
+at its durable operation slot. An already committed matching key can replay under live
+authority even if the plan is absent. Terminal publication commits fresh staged transcript rows, the assistant response,
 and its linked receipt together in one profile transaction. Borrowed row IDs or message UIDs
 cannot turn an unrelated committed response into a receipt. Repeated publication returns
 the original committed identities.
@@ -97,7 +105,102 @@ Changing the operation for the same key is rejected. Tool calls run in stable se
 External effects and every other tool return `completion_replay_unsafe`. No durable adapter
 for those effects is claimed by this phase.
 
-## Verification receipt
+## Review follow-up verification receipt
+
+Follow-up implementation revision: `fd51556f4b94dc0e264a41520ffc6ad23ea03cd2`.
+Reviewed starting HEAD: `1693719b355349600f12cfff3018d7eb0b7ebcd7`.
+Verification date: 2026-10-07, macOS arm64, Python 3.14.7.
+
+The explicit silent scope suppresses stream, reasoning, tool-generation, status, interim,
+reaction, TTS, plugin-stream, and presentation callbacks. Context-local stdout/stderr routing
+and logging filters also cover inherited workers after the parent exits. Provider watchdogs
+and periodic callbacks retain the scope through error handling, including uncaught worker
+failures. Ordinary contexts retain their original output and callbacks.
+
+The audited direct boundaries refuse metrics consent reconciliation, lifecycle accounting,
+activity projections, titles, request dumps, trajectories, background review, finalizer
+cleanup, and provider cache/rate-limit publication. Native turn-lease renewal/release,
+process-local bookkeeping, provider transport cleanup, and the fenced saga writes remain.
+Oversized tool results are bounded inline, bypassing spill files, pruning, remote-environment
+resolution, and filesystem budget persistence. Native result envelopes, including early
+errors, contain no response text or transcript messages. No committed response is delivered
+to a CLI, TUI, desktop, or gateway surface in this phase.
+
+| Verification | Exact result |
+| --- | --- |
+| Original 146-test foundation/saga command, with new cases | **178 passed, 0 failed**: 85 foundation, 93 saga, including 32 added review cases. |
+| Affected 16-file suite in isolated candidate snapshot | **190 passed, 0 failed, 1 skipped**. |
+| Additional 10 observer/provider files in isolation | **255 passed, 0 failed**. |
+| Final provider/scheduler subset after health fixes | **9 passed, 0 failed**. |
+| Ordinary relocated request-debug behavior | **1 passed, 0 failed**, 62 deselected. |
+| Documented 26-file candidate | **284 passed, 17 failed, 1 skipped, 10 strict xfailed**. |
+| Unchanged approved Phase 0/1 base, same 26 files/layout | **284 passed, 17 failed, 1 skipped, 10 strict xfailed**. |
+| `python scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. |
+| Unstaged and staged `git diff --check` | **Passed**. |
+
+Candidate and base have identical failing test IDs and assertion causes after normalizing
+only generated task IDs. The exact 17 IDs remain in the comparison table below: 14 notifier
+home-I/O guard failures, two Kanban-tool home-I/O guard failures, and the infrastructure
+spawn/card assertion. There are no new failures. The historical WAL-preflight race did not
+occur. No file retries were enabled. The 10 strict expected failures remain four legacy TUI
+crash cases for Phase 6, five Terminal lifecycle cases for Phase 4, and one interactive CLI
+route-capture case for Phase 3. Their files and expected-failure contracts are unchanged.
+
+The first nine focused review cases failed on the reviewed implementation before source
+changes, for the intended holder, missing agent, plan-slot, and premature-output reasons.
+Additional audit regressions failed before their corresponding fixes: five observer/tool
+spill/native-envelope cases, two worker exception cases, the native error fallback case,
+and the cached-prompt reconstruction case. Successful publication/effect fixtures now take
+real durable turn leases and persist their plans. Tests exercise the actual native loop,
+effect guard, callback lookups, provider watchdogs, and scheduler workers against disposable
+board/profile stores. A crash immediately before receipt followed by retry commits one
+linked response receipt and one comment. Intermediate callback-restoration and scheduler
+worker-start regressions were corrected and their tests pass.
+
+The foundation and affected commands are exactly those listed below. The latest foundation
+run used the worktree's prepared `test-env/bin/python`. The affected and observer runs used
+`phase2-base-env/bin/python` in the isolated source snapshot
+`/private/tmp/hermes-completion-phase01.G1Ybro/phase2-candidate`. The final base comparison
+ran only after verifying a clean detached checkout of
+`4500a0f640f2d15a22e694435cc7a061586c35a5` in the same Hermes worktree layout.
+The 26-file command is unchanged from the foundation receipt, using `test-env/bin/python`
+for candidate and `phase2-base-env/bin/python` for base.
+
+Additional observer/provider command:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/phase2-base-env/bin/python \
+scripts/run_tests.sh \
+  tests/agent/test_cron_inline_api_call.py \
+  tests/agent/test_periodic_scheduler.py \
+  tests/agent/test_periodic_scheduler_context.py \
+  tests/agent/test_nous_rate_guard.py \
+  tests/agent/test_system_prompt_restore.py \
+  tests/agent/test_prompt_cache_boundary.py \
+  tests/agent/test_plugin_stream_hooks.py \
+  tests/agent/test_provider_fallback.py \
+  tests/hermes_cli/test_relay_shared_metrics.py \
+  tests/hermes_cli/test_relay_shared_metrics_runtime.py \
+  -q --tb=short --file-retries 0 -j 4
+```
+
+The final worker subset used that interpreter and the first three files with
+`-q --tb=short --file-retries 0 -j 3`. Ordinary debug verification used
+`tests/agent/test_run_agent_codex_responses.py` with
+`-k test_dump_api_request_debug_reads_the_anthropic_client_and_messages_url`
+and `-q --tb=short --file-retries 0 -j 1` in the isolated candidate.
+
+Final logs under `/private/tmp/hermes-completion-phase01.G1Ybro/`:
+`phase2-review-foundation-final-source.log`, `phase2-review-affected-isolated-final.log`,
+`phase2-review-observers-isolated.log`, `phase2-review-workers-final.log`,
+`phase2-review-request-debug.log`, `phase2-review-regression-candidate-final.log`,
+`phase2-review-regression-base-final.log`, and `phase2-review-check-receipt.log`.
+Red evidence: `phase2-review-red.log`, `phase2-review-audit-red.log`,
+`phase2-review-worker-red.log`, `phase2-review-fallback-red.log`, and
+`phase2-review-prompt-red.log`. The owned red-run trajectory artifact was preserved outside
+the repository as `phase2-review-red-trajectory.jsonl`.
+
+## Initial Phase 2 verification
 
 Verified on 2026-10-07 on macOS arm64, Python 3.14.7. The prepared interpreter was
 `/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python`. Tests used the canonical
@@ -285,13 +388,22 @@ Affected persistence/effect files:
 
 ## Files changed
 
-The implementation and receipt change these 19 files:
+The initial Phase 2 implementation and receipt changed these 19 files:
 
 - Saga/storage: `hermes_cli/completion_inbox.py`, `hermes_cli/completion_inbox_store.py`, `hermes_cli/completion_inbox_recovery.py`, `hermes_state_kanban.py`, `hermes_cli/kanban_delivery_schema.py`.
 - Native turn/persistence: `agent/completion_inbox_execution.py`, `agent/session_persistence.py`, `agent/turn_context.py`, `agent/turn_facade.py`, `agent/turn_facade_lease.py`, `agent/turn_final_response.py`.
 - Actual effect boundaries and observers: `agent/tool_executor.py`, `agent/tool_dispatch_helpers.py`, `model_tools.py`, `hermes_cli/lifecycle.py`, `agent/title_generator.py`.
 - Behavior tests: `tests/hermes_cli/test_completion_inbox_saga.py`.
 - Documentation: `website/docs/developer-guide/kanban-completion-foundation.md`, `website/docs/developer-guide/kanban-completion-inbox-saga.md`.
+
+
+The review follow-up changes 25 intended files:
+
+- Durable authority and plan: `hermes_cli/completion_inbox.py`, `agent/completion_inbox_execution.py`.
+- Silent/native/output policy: `agent/completion_inbox_silence.py`, `agent/completion_inbox_native.py`, `agent/completion_inbox_output.py`, `run_agent.py`, `agent/turn_facade.py`, `agent/turn_finalizer.py`, `agent/session_persistence.py`.
+- Provider and inherited worker boundaries: `agent/chat_completion_helpers.py`, `agent/periodic_scheduler.py`, `agent/nous_rate_guard.py`, `agent/system_prompt.py`, `agent/request_debug.py`, `agent/agent_runtime_helpers.py`.
+- Observers and tool output: `agent/tool_executor.py`, `agent/plugin_stream_hooks.py`, `agent/relay_runtime.py`, `agent/turn_context.py`, `agent/turn_usage.py`, `hermes_cli/observability/relay_shared_metrics.py`, `hermes_cli/observability/shared_metrics_process.py`.
+- Tests and receipts: `tests/hermes_cli/test_completion_inbox_saga.py`, `website/docs/developer-guide/kanban-completion-foundation.md`, `website/docs/developer-guide/kanban-completion-inbox-saga.md`.
 
 ## Remaining boundary
 
