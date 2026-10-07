@@ -44,7 +44,6 @@ on:
         value: ${{ jobs.aggregate.outputs.review_status }}
 
 permissions:
-  pull-requests: write
   contents: read
 
 jobs:
@@ -60,11 +59,10 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Scan diff for critical patterns
         id: scan
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -163,6 +161,7 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check for unbounded PyPI deps
         id: bounds
