@@ -118,6 +118,28 @@ class SessionKanbanRoutesMixin:
         self._execute_write(create)
         return route_id
 
+    def _discard_kanban_return_route(self, route_id: str, board_uuid: str) -> None:
+        """Remove only a provisional route whose board task failed to commit.
+
+        The immutable ownership witness remains, so the opaque id can never be
+        rebound to another board or profile.
+        """
+        assert_trusted_route_writer()
+        owner = str(self.db_path.resolve())
+
+        def discard(conn):
+            row = conn.execute(
+                "SELECT board_uuid,owner_state_path FROM kanban_return_routes "
+                "WHERE return_route_id=?", (route_id,),
+            ).fetchone()
+            if row is None:
+                return
+            if row[0] != board_uuid or row[1] != owner:
+                raise PermissionError("provisional return route belongs to a different owner")
+            conn.execute("DELETE FROM kanban_return_routes WHERE return_route_id=?", (route_id,))
+
+        self._execute_write(discard)
+
     def resolve_kanban_return_route(self, route_id: str, board_uuid: str) -> dict | None:
         version = self._read_one("SELECT version FROM kanban_route_schema WHERE singleton=1")
         if version is None or version[0] != KANBAN_ROUTE_SCHEMA_VERSION:
