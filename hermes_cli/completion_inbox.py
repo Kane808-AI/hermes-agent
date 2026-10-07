@@ -41,12 +41,7 @@ class CompletionInbox:
         if self.route is None:
             raise PermissionError("completion route does not belong to this board/profile")
         self.pid, self.started = process_identity()
-        authority = state._read_one("SELECT * FROM kanban_session_consumers WHERE session_id=?",
-                                    (self.route["session_id"],))
-        if authority is None:
-            raise PermissionError("absent consumer authority")
-        self.fence, self.owner = authority["consumer_fence"], authority["lease_owner"]
-        state._execute_write(self._validate_authority)
+        state._execute_write(self._bind_authority)
         with state._lock:
             store.initialize_store(state._conn, state.db_path, profile=True)
         self.board_path = Path(board.execute("PRAGMA database_list").fetchone()[2])
@@ -57,22 +52,72 @@ class CompletionInbox:
         active = _BOARD_CONNECTION.get()
         return active[1] if active is not None and active[0] is self else self._board
 
+    @staticmethod
+    def _compression_chain_on_conn(conn, session_id: str) -> list[str]:
+        """Derive route-to-tip continuity from persisted compression edges only."""
+        from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+
+        current = session_id
+        chain = [current] if current else []
+        seen = set(chain)
+        for _ in range(_CHAIN_CAP):
+            row = conn.execute(_CHAIN_STEP_SQL, (current,)).fetchone()
+            child_id = row["id"] if row is not None else None
+            if not child_id or child_id in seen:
+                return chain
+            seen.add(child_id)
+            current = child_id
+            chain.append(child_id)
+        return chain
+
+    def _bind_authority(self, conn):
+        """Bind the route to its verified live compression tip and exact authority."""
+        chain = self._compression_chain_on_conn(conn, self.route["session_id"])
+        if not chain:
+            raise PermissionError("completion route has no verified session lineage")
+        target = conn.execute(
+            "SELECT source,started_at FROM sessions WHERE id=?", (chain[-1],)
+        ).fetchone()
+        if target is None or str(target["source"] or "").lower() != "cli":
+            raise PermissionError("completion lineage has no interactive CLI tip")
+        authority = conn.execute(
+            "SELECT * FROM kanban_session_consumers WHERE session_id=?", (chain[-1],)
+        ).fetchone()
+        if authority is None:
+            raise PermissionError("absent consumer authority")
+        self.session_id = chain[-1]
+        self.session_started_at = target["started_at"]
+        self.fence, self.owner = authority["consumer_fence"], authority["lease_owner"]
+        return self._validate_authority(conn)
+
     def _validate_authority(self, conn, *, allow_missing_route=False):
         assert_trusted_route_writer()
-        session = conn.execute("SELECT started_at FROM sessions WHERE id=?", (self.route["session_id"],)).fetchone()
-        if session is None or session[0] != self.route["session_started_at"]:
+        origin = conn.execute(
+            "SELECT source,started_at FROM sessions WHERE id=?", (self.route["session_id"],)
+        ).fetchone()
+        if origin is None or str(origin["source"] or "").lower() != "cli" \
+                or origin["started_at"] != self.route["session_started_at"]:
             raise PermissionError("completion session incarnation changed")
         route = conn.execute("SELECT * FROM kanban_return_routes WHERE return_route_id=?",
                              (self.route["return_route_id"],)).fetchone()
         if (route is None and not allow_missing_route) or (route is not None and dict(route) != self.route) \
                 or self.route["owner_state_path"] != str(self.state.db_path.resolve()):
             raise PermissionError("completion route changed or missing")
+        chain = self._compression_chain_on_conn(conn, self.route["session_id"])
+        if not chain or chain[-1] != self.session_id:
+            raise PermissionError("completion live compression lineage changed")
+        session = conn.execute(
+            "SELECT source,started_at FROM sessions WHERE id=?", (self.session_id,)
+        ).fetchone()
+        if session is None or str(session["source"] or "").lower() != "cli" \
+                or session["started_at"] != self.session_started_at:
+            raise PermissionError("completion tip session incarnation changed")
         live = conn.execute("SELECT * FROM kanban_session_consumers WHERE session_id=?",
-                            (self.route["session_id"],)).fetchone()
+                            (self.session_id,)).fetchone()
         if live is None or not self.owner or self.fence < 1 or live["consumer_fence"] != self.fence \
                 or live["lease_owner"] != self.owner or (live["lease_expires_at"] or 0) <= time.time() \
                 or live["owner_pid"] != self.pid or live["owner_started_at"] != self.started \
-                or live["session_started_at"] != self.route["session_started_at"] \
+                or live["session_started_at"] != self.session_started_at \
                 or process_identity() != (self.pid, self.started):
             raise PermissionError("absent, expired, superseded or wrong-owner consumer authority")
         return live["lease_expires_at"]
@@ -139,8 +184,8 @@ class CompletionInbox:
         record = store.ledger(conn, self.board_id, delivery["id"])
         if record is None or (receipt and record["response_message_id"] is None):
             raise RuntimeError("completion receipt is not committed" if receipt else "completion marker is not committed")
-        pairs = (("return_route_id", delivery["return_route_id"]), ("session_id", self.route["session_id"]),
-                 ("session_started_at", self.route["session_started_at"]))
+        pairs = (("return_route_id", delivery["return_route_id"]), ("session_id", self.session_id),
+                 ("session_started_at", self.session_started_at))
         if any(record[key] != value for key, value in pairs) or (delivery["turn_id"] is not None and (
                 record["turn_id"] != delivery["turn_id"] or record["marker_message_id"] != delivery["marker_message_id"])):
             raise RuntimeError("completion identity mismatch")
@@ -156,18 +201,18 @@ class CompletionInbox:
             raise RuntimeError("delivery is not claimed")
         if store.ledger(conn, self.board_id, delivery_id):
             return self._record(conn, delivery)
-        store.reconcile_retirements(conn, self.board, self.board_id, self.route["session_id"],
+        store.reconcile_retirements(conn, self.board, self.board_id, self.session_id,
                                     owner_state_path=self.route["owner_state_path"],
-                                    session_started_at=self.route["session_started_at"])
+                                    session_started_at=self.session_started_at)
         competing = conn.execute("SELECT 1 FROM kanban_inbox_transcripts WHERE session_id=? "
                                  "AND session_started_at=? AND response_message_id IS NULL AND retired_reason IS NULL",
-                                 (self.route["session_id"], self.route["session_started_at"])).fetchone()
+                                 (self.session_id, self.session_started_at)).fetchone()
         if competing:
             raise RuntimeError("another completion turn is admitted")
         turn = uuid.uuid5(uuid.NAMESPACE_URL, f"hermes-completion:{self.board_id}:{delivery_id}").hex
         record = {"board_uuid": self.board_id, "delivery_id": delivery_id,
-                  "return_route_id": delivery["return_route_id"], "session_id": self.route["session_id"],
-                  "session_started_at": self.route["session_started_at"], "turn_id": turn}
+                  "return_route_id": delivery["return_route_id"], "session_id": self.session_id,
+                  "session_started_at": self.session_started_at, "turn_id": turn}
         event = self.board.execute("SELECT kind,substr(payload,1,4096) FROM task_events WHERE id=? AND task_id=?",
                                    (delivery["event_id"], delivery["task_id"])).fetchone()
         if event is None:
@@ -210,11 +255,11 @@ class CompletionInbox:
     def _guard_turn(self, conn, holder):
         if not isinstance(holder, str) or not holder.strip():
             raise PermissionError("completion requires an admitted turn lease holder")
-        key = self.state._session_turn_lease_key_on_conn(conn, self.route["session_id"])
+        key = self.state._session_turn_lease_key_on_conn(conn, self.session_id)
         lease = conn.execute("SELECT holder,expires_at FROM session_turn_leases WHERE conversation_id=?", (key,)).fetchone()
         if lease is None or lease[0] != holder or lease[1] <= time.time():
             raise PermissionError("completion turn lease expired or superseded")
-        self.state._check_transcript_write_guards(conn, self.route["session_id"], None,
+        self.state._check_transcript_write_guards(conn, self.session_id, None,
                                                  turn_lease_holder=holder, reject_active_turn_lease=True)
 
     def authorize_staged_turn(self, delivery_id, rows, *, turn_lease_holder):

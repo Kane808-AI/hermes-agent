@@ -160,10 +160,16 @@ def _route_map(state, session_id: str) -> dict[str, str]:
     session = state.get_session(session_id)
     if session is None or str(session["source"] or "").lower() != "cli":
         return {}
+    lineage = state.get_compression_lineage(session_id)
+    if not lineage or lineage[-1] != session_id:
+        return {}
+    placeholders = ",".join("?" for _ in lineage)
     rows = state._read_all(
-        "SELECT return_route_id,board_uuid FROM kanban_return_routes "
-        "WHERE session_id=? AND session_started_at=? AND surface='cli'",
-        (session_id, session["started_at"]),
+        "SELECT r.return_route_id,r.board_uuid FROM kanban_return_routes r "
+        "JOIN sessions s ON s.id=r.session_id AND s.started_at=r.session_started_at "
+        f"WHERE r.session_id IN ({placeholders}) AND r.surface='cli' "
+        "AND r.owner_state_path=?",
+        (*lineage, str(state.db_path.resolve())),
     )
     return {str(row["return_route_id"]): str(row["board_uuid"]) for row in rows}
 

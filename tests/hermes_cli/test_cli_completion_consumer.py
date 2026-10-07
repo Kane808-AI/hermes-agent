@@ -1,6 +1,8 @@
 """Phase 4 behavior contracts for classic CLI completion consumption."""
 import contextlib
+import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,7 @@ from hermes_cli.kanban_delivery import (
     trusted_return_route,
 )
 from hermes_state import SessionDB
+from run_agent import AIAgent
 
 
 ENABLED = {
@@ -217,6 +220,121 @@ def test_poll_runs_pending_route_refreshes_transcript_then_acknowledges(tmp_path
         monkeypatch.setattr(consumer_module, "_CONSUMER_HEARTBEAT_INTERVAL_SECONDS", 0.01)
         assert consumer_module.poll_completion_inbox(cli) == 1
         assert calls == ["run", ("present", "durable completion"), "ack"]
+        lease.release()
+
+
+def test_poll_consumes_parent_route_once_on_verified_live_compression_tip(tmp_path, monkeypatch):
+    """A route stays on parent A while its receipt follows the verified live tip B."""
+    from hermes_cli import cli_completion_consumer as consumer_module
+    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    board_path = tmp_path / "board.db"
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state, \
+            kbc.connect_closing(board_path) as board:
+        state.create_session("parent-a", source="cli")
+        route = state.create_kanban_return_route(
+            board_uuid(board), "parent-a", surface="cli", interactive=True
+        )
+        with trusted_board_controller(state):
+            configure_producer(board, ENABLED)
+        with trusted_return_route(state, board, route):
+            task = kb.create_task(board, title="worker before compression")
+        with kb.write_txn(board):
+            kb._append_event(board, task, "completed", {"result": "done after compression"})
+        delivery_id = board.execute("SELECT id FROM kanban_deliveries").fetchone()[0]
+
+        lease = _active_lease(tmp_path, state, "parent-a")
+        with patch("model_tools.get_tool_definitions", return_value=[]), \
+                patch("model_tools.check_toolset_requirements", return_value={}), \
+                patch("agent.process_bootstrap.OpenAI"):
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                skip_background_review=True,
+                session_id="parent-a",
+                session_db=state,
+            )
+        agent.client = MagicMock()
+        agent.valid_tool_names = {"kanban_comment"}
+        agent._cached_system_prompt = "Stored byte-stable prompt."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.context_compressor._micro_compact_enabled = False
+        agent._memory_manager = None
+        agent.save_trajectories = False
+
+        cli = _cli(state, lease, "parent-a")
+        cli.agent = agent
+        presented = []
+        cli._present_completion_inbox_response = presented.append
+
+        state.end_session("parent-a", "compression")
+        state.create_session("live-child-b", source="cli", parent_session_id="parent-a")
+        state.append_message("live-child-b", "user", "compressed context")
+        state.append_message("live-child-b", "assistant", "compression summary")
+        assert consumer_module.refresh_external_transcript(cli, force=True)
+        assert cli.session_id == agent.session_id == lease.session_id == "live-child-b"
+
+        tool = _mock_tool_call(
+            name="kanban_comment",
+            call_id="lineage-effect",
+            arguments=json.dumps({"task_id": task, "body": "one lineage effect"}),
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content=None, tool_calls=[tool], finish_reason="tool_calls"),
+            _mock_response(content="one live-tip receipt"),
+        ]
+        monkeypatch.setattr(consumer_module, "discover_board_paths", lambda: [board_path])
+
+        assert consumer_module.poll_completion_inbox(cli) == 1
+        delivery = board.execute(
+            "SELECT state,return_route_id FROM kanban_deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        record = state._read_one(
+            "SELECT * FROM kanban_inbox_transcripts WHERE delivery_id=?", (delivery_id,)
+        )
+        route_row = state._read_one(
+            "SELECT session_id,session_started_at FROM kanban_return_routes WHERE return_route_id=?",
+            (route,),
+        )
+        assert tuple(delivery) == ("acknowledged", route)
+        assert route_row["session_id"] == "parent-a"
+        assert record["session_id"] == "live-child-b"
+        assert state.get_session("parent-a")["started_at"] == route_row["session_started_at"]
+
+        live_messages = state.get_messages("live-child-b")
+        receipts = [
+            message for message in live_messages
+            if (message.get("display_metadata") or {}).get("completion_inbox", {}).get("kind") == "response"
+        ]
+        markers = [
+            message for message in live_messages
+            if (message.get("display_metadata") or {}).get("completion_inbox", {}).get("kind") == "marker"
+        ]
+        assert len(markers) == len(receipts) == 1
+        assert receipts[0]["id"] == record["response_message_id"]
+        assert not any(
+            (message.get("display_metadata") or {}).get("completion_inbox")
+            for message in state.get_messages("parent-a")
+        )
+        assert len(kb.list_comments(board, task)) == 1
+        assert presented == ["one live-tip receipt"]
+
+        agent.client.chat.completions.create.reset_mock()
+        assert consumer_module.poll_completion_inbox(cli) == 0
+        agent.client.chat.completions.create.assert_not_called()
+        assert len(kb.list_comments(board, task)) == 1
+        assert len([
+            message for message in state.get_messages("live-child-b")
+            if (message.get("display_metadata") or {}).get("completion_inbox", {}).get("kind") == "response"
+        ]) == 1
         lease.release()
 
 
