@@ -35,7 +35,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write # needed by lint (PR comment) + supply-chain review_status
+  # PR comments are written only by the trusted CI review-comment workflow.
 
 # cancel-in-progress only ever applies to PR events. A push, a dispatch, and
 # above all a stable-release workflow_call run are never cancelled by a later
@@ -83,6 +83,8 @@ jobs:
       event_name: ${{ github.event_name }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
       - name: Detect affected areas
         id: classify
         uses: ./.github/actions/detect-changes
@@ -157,6 +159,8 @@ jobs:
 
   js-tests:
     name: JS & TS checks
+    permissions:
+      contents: read
     needs: detect
     if: needs.detect.outputs.frontend == 'true'
     uses: ./.github/workflows/js-tests.yml
@@ -356,6 +360,7 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Evaluate job results
         id: evaluate
         # Shared with the stable orchestrator (scripts/ci/required_results.py
@@ -381,6 +386,9 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   ci-timings:
     name: CI timing report
+    permissions:
+      contents: read
+      actions: read # timings_report.py reads workflow runs and jobs.
     needs: [all-checks-pass]
     if: always()
     runs-on: ubuntu-latest
@@ -388,6 +396,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Restore baseline cache (PR only)
         if: github.event_name == 'pull_request'
