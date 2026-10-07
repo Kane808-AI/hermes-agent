@@ -632,6 +632,10 @@ CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
 """
 
 # Indexes on later-added columns must run AFTER _reconcile_columns(), or executescript fails on legacy DBs.
+from hermes_state_kanban import KANBAN_ROUTE_SCHEMA_SQL  # noqa: E402
+
+SCHEMA_SQL += KANBAN_ROUTE_SCHEMA_SQL
+
 DEFERRED_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
     ON messages(session_id, active, timestamp);

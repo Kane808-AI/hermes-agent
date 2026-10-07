@@ -935,6 +935,8 @@ class SessionSchemaMixin:
         # loops for a rare failure mode.
         report_startup_progress(600.0, phase="state_db_init_schema")
         cursor = self._conn.cursor()
+        from hermes_state_kanban import prepare_route_migration
+        prepare_route_migration(self._conn, self.db_path)
         cursor.executescript(SCHEMA_SQL)
 
         # Column reconciliation, then the two table-shape repairs ADD COLUMN cannot express.

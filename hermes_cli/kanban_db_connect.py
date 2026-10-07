@@ -627,7 +627,10 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
         # Unreadable schema table is not this guard's call — the full init
         # path's header/integrity probes classify and quarantine it.
         return False
-    return row is not None
+    if row is None:
+        return False
+    from hermes_cli.kanban_delivery_schema import check_delivery_schema
+    return check_delivery_schema(conn)
 
 
 def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
@@ -727,8 +730,11 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
+                from hermes_cli.kanban_delivery_schema import prepare_delivery_migration, migrate_delivery_schema
+                prepare_delivery_migration(conn, path)
                 conn.executescript(_kb.SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
+                migrate_delivery_schema(conn)
                 _INITIALIZED_PATHS.add(resolved)
 
         conn, _ = _open_configured(path, _init_if_needed)
@@ -1211,7 +1217,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         conn.execute(f"SAVEPOINT {savepoint}")
         try:
             yield conn
-        except Exception:
+        except BaseException:
             with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(f"ROLLBACK TO {savepoint}")
                 conn.execute(f"RELEASE {savepoint}")
@@ -1223,7 +1229,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
         yield conn
-    except Exception:
+    except BaseException:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
         # don't let this secondary failure shadow the real one.
         with contextlib.suppress(sqlite3.OperationalError):
