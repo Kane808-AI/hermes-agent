@@ -4,7 +4,8 @@
 
 Phase 4 starts from approved revision
 `25db90f21ad52cd75c7aa4ede95c070f713bb4e9` and is implemented by
-`c542a76d0419893ce86bbafffa5c86dd6e2c0e35`.
+`c542a76d0419893ce86bbafffa5c86dd6e2c0e35`. The verified-compression-lineage
+continuity fix is `9cf313f8568848b8a74e9eac263375d4eef94368`.
 
 Only the classic interactive CLI can consume completion deliveries in this phase. The
 `cli_enabled` flag remains false by default and must be explicitly enabled. One-shot CLI,
@@ -28,7 +29,127 @@ acknowledgement, crash recovery, transactional effect deduplication, and suppres
 completion-execution output. The CLI renders only the committed assistant receipt, then
 acknowledges the delivery.
 
-## Verification results
+## Verified compression-lineage continuity fix
+
+The original Phase 4 implementation selected only routes owned by the current session ID.
+After a classic CLI compressed from parent A to child B, its durable consumer authority moved
+to B while the immutable route remained owned by A. The pending delivery therefore became
+invisible to the live consumer.
+
+The fix derives the current session's persisted compression lineage from the profile store and
+admits only immutable CLI routes in that lineage. The saga independently derives the route's
+canonical persisted route-to-tip chain, binds execution to the exact live tip incarnation and
+consumer row, and revalidates that chain on every cross-store operation. It never accepts
+caller-supplied ancestry. The original route remains owned by A while the marker, committed
+receipt, turn lease, retirement checks, and transcript guards target B.
+
+This preserves exact profile path, route-session incarnation, live-tip incarnation,
+active-session lease, PID and process-start identity, monotonic consumer fence, lease owner,
+turn authority, durable receipt, retry, and transactional effect-idempotency checks. Reset
+forks, explicit branches, delegates, tool sessions, copied profiles, recreated session IDs, and
+unrelated sessions do not join the canonical compression chain. There is no historical replay.
+
+### Fix verification results
+
+| Verification | Exact result |
+| --- | --- |
+| Red regression on `c542a76d0419893ce86bbafffa5c86dd6e2c0e35` | **0 passed, 1 failed, 9 deselected**. `poll_completion_inbox(cli)` returned `0` instead of `1`. |
+| Existing 25 Phase 4 contracts plus lineage regression | **26 passed, 0 failed**. |
+| Existing 203 combined foundation/saga/Phase 4 contracts plus lineage regression | **204 passed, 0 failed**. |
+| Byte-exact 14-file affected suite | **193 passed, 0 failed, 4 platform skips**. |
+| 26-file candidate regression | **301 passed, 17 failed, 1 skipped, 4 strict xfailed**. |
+| Same 26 files on `c542a76d0419893ce86bbafffa5c86dd6e2c0e35` | **301 passed, 17 failed, 1 skipped, 4 strict xfailed**. |
+| Candidate/base failure-ID comparison | **Identical 17 failure IDs**, with no new failure. The 16 real-home guard failures and one `auto_blocked` assertion are unchanged. |
+| `python scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. |
+| Unstaged and staged `git diff --check` | **Passed**. |
+
+The documented intermittent WAL-preflight race did not occur in these fix-verification runs.
+
+### Fix red evidence and isolated provenance
+
+The red directory `/private/tmp/hermes-completion-phase4-lineage-red.oVzWsh` was created from
+an exact archive of `c542a76d0419893ce86bbafffa5c86dd6e2c0e35`, then only the final regression
+test file was copied into it. It is intentionally a red test overlay, not a byte-exact candidate
+snapshot. The failing assertion is recorded in
+`/private/tmp/hermes-completion-phase4-lineage-red.log`.
+
+The affected-suite candidate directory
+`/private/tmp/hermes-completion-phase4-lineage-candidate.vHMgOO` was created directly with
+`git archive 9cf313f8568848b8a74e9eac263375d4eef94368`. No file was copied or overlaid after
+archive extraction. This is the byte-exact isolated candidate used for the 26-contract,
+204-contract, and 14-file affected-suite results. Because an archive has no `.git` directory,
+the runner's optional precompile printed `fatal: not a git repository`. Collection and execution
+continued normally.
+
+The regression base directory
+`/Users/chriskaneshiro/.hermes/hermes-agent/.worktrees/completion-inbox-phase4-lineage-base.3sGj2Q`
+was created directly with `git archive c542a76d0419893ce86bbafffa5c86dd6e2c0e35` in the
+same worktree-layout parent as the implementation worktree used for the candidate regression.
+It had no overlay. This placement intentionally reproduced the same documented real-home
+manifest guard in both regression runs.
+
+### Exact fix commands
+
+Red regression:
+
+```bash
+git archive c542a76d0419893ce86bbafffa5c86dd6e2c0e35 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-lineage-red.oVzWsh
+cp tests/hermes_cli/test_cli_completion_consumer.py \
+  /private/tmp/hermes-completion-phase4-lineage-red.oVzWsh/tests/hermes_cli/
+cd /private/tmp/hermes-completion-phase4-lineage-red.oVzWsh
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 1 -k verified_live_compression_tip
+```
+
+Byte-exact candidate creation:
+
+```bash
+snapshot_dir=$(mktemp -d \
+  /private/tmp/hermes-completion-phase4-lineage-candidate.XXXXXX)
+git archive 9cf313f8568848b8a74e9eac263375d4eef94368 | \
+  tar -x -C "$snapshot_dir"
+```
+
+The exact 26-contract and 204-contract commands are the existing Phase 4 contract and combined
+commands below, run from the byte-exact candidate. The exact affected-suite command is the
+existing 14-file command below, also run from that candidate.
+
+Candidate/base regression:
+
+```bash
+base_dir=$(mktemp -d \
+  /Users/chriskaneshiro/.hermes/hermes-agent/.worktrees/completion-inbox-phase4-lineage-base.XXXXXX)
+git archive c542a76d0419893ce86bbafffa5c86dd6e2c0e35 | \
+  tar -x -C "$base_dir"
+
+# Run the documented 26-file regression command below once from the candidate
+# and once from "$base_dir", then compare normalized failure IDs.
+diff -u \
+  <(rg '^FAILED ' /private/tmp/hermes-completion-phase4-lineage-regression-base.log | sort -u) \
+  <(rg '^FAILED ' /private/tmp/hermes-completion-phase4-lineage-regression-candidate.log | sort -u)
+```
+
+Repository checks:
+
+```bash
+/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python scripts/check
+git diff --check
+git diff --cached --check
+```
+
+Fix logs:
+
+- `/private/tmp/hermes-completion-phase4-lineage-red.log`
+- `/private/tmp/hermes-completion-phase4-lineage-narrow-exact.log`
+- `/private/tmp/hermes-completion-phase4-lineage-combined-exact.log`
+- `/private/tmp/hermes-completion-phase4-lineage-affected-isolated.log`
+- `/private/tmp/hermes-completion-phase4-lineage-regression-candidate.log`
+- `/private/tmp/hermes-completion-phase4-lineage-regression-base.log`
+- `/private/tmp/hermes-completion-phase4-lineage-check-receipt.log`
+
+## Original Phase 4 verification results
 
 | Verification | Exact result |
 | --- | --- |
@@ -230,7 +351,16 @@ Final logs:
 
 ## Changed files
 
-Implementation revision:
+Compression-lineage continuity fix:
+
+- `hermes_cli/cli_completion_consumer.py`
+- `hermes_cli/completion_inbox.py`
+- `tests/hermes_cli/test_cli_completion_consumer.py`
+
+The separate follow-up receipt revision changes only
+`website/docs/developer-guide/kanban-completion-cli-consumer.md`.
+
+Original Phase 4 implementation revision:
 
 - `hermes_cli/active_sessions.py`
 - `hermes_cli/cli_chat_turn_mixin.py`
