@@ -4,6 +4,9 @@ name: JS Tests
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: JS & TS checks
@@ -21,6 +24,8 @@ jobs:
       NODE_OPTIONS: ${{ github.repository != 'NousResearch/hermes-agent' && '--max-old-space-size=4096' || '' }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up the locked JS build toolchain
         id: node
         uses: ./.github/actions/setup-pm
