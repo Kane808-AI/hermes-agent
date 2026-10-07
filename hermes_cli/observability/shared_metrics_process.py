@@ -209,6 +209,9 @@ def _report_dead_markers(home: Path, own: Path) -> None:
 def arm_turn(agent: Any) -> None:
     """At turn entry (profile scope bound): the owning home for an off-thread watchdog abort, and
     a fresh once-per-turn latch shared by both turn watchdogs."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     try:
         from hermes_constants import get_hermes_home
 
@@ -220,6 +223,9 @@ def arm_turn(agent: Any) -> None:
 
 def record_watchdog_turn_abort(agent: Any) -> None:
     """One exit_kind=watchdog row per turn a watchdog killed, in the turn's own profile. Never raises."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     try:
         home = getattr(agent, "_metrics_turn_home", None)
         # No armed turn means no known owning profile: never guess the scope.

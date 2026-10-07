@@ -1590,58 +1590,6 @@ def _api_error_debug_info(error: Exception) -> Dict[str, Any]:
     return info
 
 
-def dump_api_request_debug(
-    agent, api_kwargs: Dict[str, Any], *, reason: str, error: Optional[Exception] = None
-) -> Optional[Path]:
-    """Dump the request body from api_kwargs (minus transport keys) for debugging provider 4xx failures."""
-    try:
-        body = {k: v for k, v in copy.deepcopy(api_kwargs).items() if v is not None and k != "timeout"}
-        api_key = None
-        # anthropic_messages keeps its SDK client on ``_anthropic_client`` (``client`` is None):
-        # read the key from there so the dump does not say "Bearer None" (#24293).
-        anthropic = agent.api_mode == "anthropic_messages"
-        try:
-            live = getattr(agent, "_anthropic_client", None) if anthropic else agent.client
-            api_key = getattr(live, "api_key", None) or getattr(live, "auth_token", None)
-        except Exception as e:
-            _ra().logger.debug("Could not extract API key for debug dump: %s", e)
-        endpoint = {"codex_responses": "/responses", "anthropic_messages": "/messages"}.get(
-            agent.api_mode, "/chat/completions"
-        )
-        dump_payload: Dict[str, Any] = {
-            "timestamp": datetime.now().isoformat(), "session_id": agent.session_id, "reason": reason,
-            "request": {
-                "method": "POST", "url": f"{agent.base_url.rstrip('/')}{endpoint}",
-                "headers": {
-                    "Authorization": f"Bearer {agent._mask_api_key_for_logs(api_key)}",
-                    "Content-Type": "application/json",
-                },
-                "body": body,
-            },
-        }
-        if error is not None:
-            dump_payload["error"] = _api_error_debug_info(error)
-        # Sanitize the session ID (may come from an untrusted X-Hermes-Session-Id header) so a
-        # "../"-shaped ID cannot write outside logs_dir.
-        from agent.session_persistence import _safe_session_filename_component
-        safe_sid = _safe_session_filename_component(agent.session_id)
-        dump_file = agent.logs_dir / f"request_dump_{safe_sid}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
-        # Redact secrets first: this fires unconditionally on API errors and captures the full
-        # request body, so context-embedded secrets would otherwise land in cleartext on disk.
-        from agent.redact import redact_sensitive_text
-        _serialized = json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
-        _redacted_payload = json.loads(redact_sensitive_text(_serialized, force=True))
-        atomic_json_write(dump_file, _redacted_payload, default=str)
-        agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
-        if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
-            print(json.dumps(_redacted_payload, ensure_ascii=False, indent=2, default=str))
-        return dump_file
-    except Exception as dump_error:
-        if agent.verbose_logging:
-            logger.warning("Failed to dump API request debug payload: %s", dump_error)
-        return None
-
-
 def _direct_native_anthropic_tool_cache_capability(
     agent, *, provider: Optional[str] = None, base_url: Optional[str] = None,
     api_mode: Optional[str] = None, model: Optional[str] = None,
@@ -3900,7 +3848,7 @@ __all__ = [
     "convert_to_trajectory_format", "sanitize_tool_call_arguments", "repair_message_sequence",
     "strip_think_blocks", "recover_with_credential_pool", "try_recover_primary_transport",
     "drop_thinking_only_and_merge_users", "restore_primary_runtime", "extract_reasoning",
-    "dump_api_request_debug", "prompt_caching_disabled_from_config", "blank_cache_policy_stub",
+    "prompt_caching_disabled_from_config", "blank_cache_policy_stub",
     "plan_cache_sections_for_destination", "anthropic_prompt_cache_policy", "create_openai_client",
     "switch_model", "invoke_tool", "repair_tool_call", "sanitize_api_messages",
     "looks_like_codex_intermediate_ack", "copy_reasoning_content_for_api", "cleanup_dead_connections",

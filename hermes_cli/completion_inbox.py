@@ -207,11 +207,12 @@ class CompletionInbox:
         return self._locked(publish_on_conn, rows=rows)
 
     def _guard_turn(self, conn, holder):
-        if holder is not None:
-            key = self.state._session_turn_lease_key_on_conn(conn, self.route["session_id"])
-            lease = conn.execute("SELECT holder,expires_at FROM session_turn_leases WHERE conversation_id=?", (key,)).fetchone()
-            if lease is None or lease[0] != holder or lease[1] <= time.time():
-                raise PermissionError("completion turn lease expired or superseded")
+        if not isinstance(holder, str) or not holder.strip():
+            raise PermissionError("completion requires an admitted turn lease holder")
+        key = self.state._session_turn_lease_key_on_conn(conn, self.route["session_id"])
+        lease = conn.execute("SELECT holder,expires_at FROM session_turn_leases WHERE conversation_id=?", (key,)).fetchone()
+        if lease is None or lease[0] != holder or lease[1] <= time.time():
+            raise PermissionError("completion turn lease expired or superseded")
         self.state._check_transcript_write_guards(conn, self.route["session_id"], None,
                                                  turn_lease_holder=holder, reject_active_turn_lease=True)
 
@@ -327,6 +328,9 @@ class CompletionInbox:
                 if old[0] != fingerprint:
                     raise RuntimeError("completion operation key reused for a different operation")
                 return old[1]
+            plan = json.loads(record["tool_plan"])
+            if slot >= len(plan) or plan[slot] != fingerprint:
+                raise PermissionError("completion effect has no matching durable tool plan slot")
             target = self.board.execute("SELECT return_route_id FROM tasks WHERE id=?", (args["task_id"],)).fetchone()
             if target is None or target[0] != delivery["return_route_id"]:
                 raise PermissionError("completion mutation target belongs to another route")

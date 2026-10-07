@@ -49,12 +49,34 @@ def inbox(stores):
     return CompletionInbox(stores.board, stores.state, stores.route)
 
 
+@contextlib.contextmanager
+def live_turn(consumer):
+    import uuid
+    holder = f"test-turn:{uuid.uuid4().hex}"
+    session = consumer.route["session_id"]
+    if not consumer.state.try_acquire_session_turn_lease(session, holder):
+        raise PermissionError("test turn lease unavailable")
+    try:
+        yield holder
+    finally:
+        consumer.state.release_session_turn_lease(session, holder)
+
+
 def publish(consumer, delivery, text="answer"):
-    from agent.completion_inbox_execution import completion_execution
-    with completion_execution(consumer, delivery) as execution:
-        row = {"role": "assistant", "content": text}
-        execution.terminal_message = row
-        execution.flush([row], [row], turn_lease_holder=None)
+    with live_turn(consumer) as holder:
+        return consumer.publish(delivery, [{"role": "assistant", "content": text}], 0, turn_lease_holder=holder)
+
+
+def authorize_effect(consumer, delivery, holder, args):
+    rows = [{"role": "assistant", "tool_calls": [{"function": {
+        "name": "kanban_comment", "arguments": json.dumps(args)}}]}]
+    consumer.authorize_staged_turn(delivery, rows, turn_lease_holder=holder)
+
+
+def planned_effect(consumer, delivery, args):
+    with live_turn(consumer) as holder:
+        authorize_effect(consumer, delivery, holder, args)
+        return consumer.effect(delivery, 0, "kanban_comment", args, turn_lease_holder=holder)
 
 
 def row(stores):
@@ -97,9 +119,7 @@ def test_restart_at_every_commit_gap(stores, boundary):
         with pytest.raises(RuntimeError, match="crash"):
             consumer.admit(stores.delivery, after_marker=lambda: (_ for _ in ()).throw(RuntimeError("crash")))
     if boundary in {"during_effect", "before_receipt", "after_receipt", "after_processed"}:
-        from agent.completion_inbox_execution import completion_execution, dispatch_completion_tool
-        with completion_execution(consumer, stores.delivery):
-            dispatch_completion_tool("kanban_comment", {"task_id": stores.task, "body": "one mutation"})
+        planned_effect(consumer, stores.delivery, {"task_id": stores.task, "body": "one mutation"})
     if boundary in {"after_receipt", "after_processed"}:
         publish(consumer, stores.delivery)
     if boundary == "after_processed":
@@ -113,9 +133,7 @@ def test_restart_at_every_commit_gap(stores, boundary):
         restarted.claim(stores.delivery)
         restarted.admit(stores.delivery)
         if boundary not in {"after_receipt", "after_processed"}:
-            from agent.completion_inbox_execution import completion_execution, dispatch_completion_tool
-            with completion_execution(restarted, stores.delivery):
-                dispatch_completion_tool("kanban_comment", {"task_id": stores.task, "body": "one mutation"})
+            planned_effect(restarted, stores.delivery, {"task_id": stores.task, "body": "one mutation"})
             publish(restarted, stores.delivery)
         restarted.reconcile(stores.delivery)
         restarted.acknowledge(stores.delivery)
@@ -232,23 +250,29 @@ def test_concurrent_recovery_reuses_committed_receipt(stores):
     assert len(stores.state.get_messages("session")) == 2
 
 
-def test_actual_dispatch_blocks_external_and_inline_effects_and_deduplicates_mutations(stores):
+def test_actual_dispatch_blocks_external_and_inline_effects_and_deduplicates_mutations(stores, native_agent):
     owner(stores)
     consumer = inbox(stores)
     consumer.claim(stores.delivery)
     consumer.admit(stores.delivery)
     from agent.completion_inbox_execution import completion_execution
     from model_tools import handle_function_call
-    with completion_execution(consumer, stores.delivery):
-        for name in ("terminal", "execute_code", "memory", "delegate_task", "kanban_complete", "unknown_external"):
-            result = json.loads(handle_function_call(name, {}))
-            assert result["error"] == "completion_replay_unsafe"
-        result = handle_function_call("kanban_comment", {"task_id": stores.task, "body": "one"})
-    with completion_execution(consumer, stores.delivery):
-        assert handle_function_call("kanban_comment", {"task_id": stores.task, "body": "one"}) == result
-    with completion_execution(consumer, stores.delivery):
+    args = {"task_id": stores.task, "body": "one"}
+    with live_turn(consumer) as holder:
+        native_agent._active_session_turn_lease_holder = holder
+        authorize_effect(consumer, stores.delivery, holder, args)
+        for attempt in range(2):
+            with completion_execution(consumer, stores.delivery) as execution:
+                execution.agent = native_agent
+                for name in ("terminal", "execute_code", "memory", "delegate_task", "kanban_complete", "unknown_external"):
+                    assert json.loads(handle_function_call(name, {}))["error"] == "completion_replay_unsafe"
+                replay = handle_function_call("kanban_comment", args)
+                if attempt == 0:
+                    result = replay
+                assert replay == result
         with pytest.raises(RuntimeError, match="different operation"):
-            consumer.effect(stores.delivery, 0, "kanban_comment", {"task_id": stores.task, "body": "changed"})
+            consumer.effect(stores.delivery, 0, "kanban_comment", {"task_id": stores.task, "body": "changed"}, turn_lease_holder=holder)
+    native_agent._active_session_turn_lease_holder = None
     assert len(kb.list_comments(stores.board, stores.task)) == 1
 
 
@@ -471,7 +495,7 @@ def test_lifecycle_hooks_are_suppressed_at_real_boundary(stores, monkeypatch):
     plugins.assert_not_called()
 
 
-def test_concurrent_native_recovery_waits_and_skips_committed_turn(stores, native_agent):
+def test_concurrent_native_recovery_waits_and_skips_committed_turn(stores, native_agent, monkeypatch):
     import threading
     from unittest.mock import patch
     from tests.agent.test_run_agent import _mock_response
@@ -499,7 +523,13 @@ def test_concurrent_native_recovery_waits_and_skips_committed_turn(stores, nativ
         assert release.wait(15)
         return _mock_response(content="one concurrent answer")
     native_agent.client.chat.completions.create.side_effect = response
-    other._emit_status = lambda text: waiting.set() if "Another Hermes" in text else None
+    acquire = stores.state.try_acquire_session_turn_lease
+    def observe_contention(*args, **kwargs):
+        acquired = acquire(*args, **kwargs)
+        if not acquired:
+            waiting.set()
+        return acquired
+    monkeypatch.setattr(stores.state, "try_acquire_session_turn_lease", observe_contention)
     with ThreadPoolExecutor(max_workers=2) as pool:
         initial = pool.submit(first.run, stores.delivery, native_agent)
         assert entered.wait(15)
@@ -521,12 +551,12 @@ def test_atomic_effect_ledger_failure_rolls_back_mutation(stores):
     stores.board.execute("CREATE TRIGGER reject_effect BEFORE INSERT ON kanban_inbox_effects "
                          "BEGIN SELECT RAISE(ABORT,'effect crash'); END")
     with pytest.raises(Exception, match="effect crash"):
-        consumer.effect(stores.delivery, 0, "kanban_comment", {"task_id": stores.task, "body": "atomic"})
+        planned_effect(consumer, stores.delivery, {"task_id": stores.task, "body": "atomic"})
     assert kb.list_comments(stores.board, stores.task) == []
     assert stores.board.execute("SELECT COUNT(*) FROM kanban_inbox_effects").fetchone()[0] == 0
     stores.board.execute("DROP TRIGGER reject_effect")
     args = {"task_id": stores.task, "body": "atomic"}
-    assert consumer.effect(stores.delivery, 0, "kanban_comment", args) == consumer.effect(stores.delivery, 0, "kanban_comment", args)
+    assert planned_effect(consumer, stores.delivery, args) == planned_effect(consumer, stores.delivery, args)
     assert len(kb.list_comments(stores.board, stores.task)) == 1
 
 
@@ -553,9 +583,14 @@ def test_effect_target_route_and_machine_local_export_state(stores):
     consumer.claim(stores.delivery)
     consumer.admit(stores.delivery)
     foreign_task = kb.create_task(stores.board, title="other origin")
-    with pytest.raises(PermissionError, match="another route"):
-        consumer.effect(stores.delivery, 0, "kanban_comment", {"task_id": foreign_task, "body": "wrong target"})
-    consumer.effect(stores.delivery, 0, "kanban_comment", {"task_id": stores.task, "body": "original"})
+    wrong, valid = {"task_id": foreign_task, "body": "wrong target"}, {"task_id": stores.task, "body": "original"}
+    with live_turn(consumer) as holder:
+        plan = [{"role": "assistant", "tool_calls": [{"function": {
+            "name": "kanban_comment", "arguments": json.dumps(args)}} for args in (wrong, valid)]}]
+        consumer.authorize_staged_turn(stores.delivery, plan, turn_lease_holder=holder)
+        with pytest.raises(PermissionError, match="another route"):
+            consumer.effect(stores.delivery, 0, "kanban_comment", wrong, turn_lease_holder=holder)
+        consumer.effect(stores.delivery, 1, "kanban_comment", valid, turn_lease_holder=holder)
     # Reset only a disposable offline snapshot, never protection triggers around a live mutation.
     import sqlite3
     with contextlib.closing(sqlite3.connect(stores.root / "snapshot.db")) as snapshot:
@@ -621,8 +656,8 @@ def test_unrelated_durable_assistant_cannot_be_relabelled_as_receipt(stores):
     borrowed = next(m for m in stores.state.get_messages_as_conversation("session", include_row_ids=True)
                     if m["_row_id"] == unrelated)
     original = stores.state.get_messages("session")[0]
-    with pytest.raises(RuntimeError, match="existing assistant"):
-        consumer.publish(stores.delivery, [borrowed], 0)
+    with live_turn(consumer) as holder, pytest.raises(RuntimeError, match="existing assistant"):
+        consumer.publish(stores.delivery, [borrowed], 0, turn_lease_holder=holder)
     assert stores.state.get_messages("session")[0] == original
     with pytest.raises(RuntimeError, match="receipt"):
         consumer.reconcile(stores.delivery)
@@ -711,7 +746,443 @@ def test_repeated_publication_reuses_response_identity(stores):
     consumer = inbox(stores)
     consumer.claim(stores.delivery)
     consumer.admit(stores.delivery)
-    original = consumer.publish(stores.delivery, [{"role": "assistant", "content": "durable"}], 0)
-    repeated = consumer.publish(stores.delivery, [{"role": "assistant", "content": "uncommitted alternative"}], 0)
+    with live_turn(consumer) as holder:
+        original = consumer.publish(stores.delivery, [{"role": "assistant", "content": "durable"}], 0, turn_lease_holder=holder)
+        repeated = consumer.publish(stores.delivery, [{"role": "assistant", "content": "uncommitted alternative"}], 0,
+                                    turn_lease_holder=holder)
     assert original == repeated
     assert [m["content"] for m in stores.state.get_messages("session") if m["role"] == "assistant"] == ["durable"]
+
+
+@pytest.mark.parametrize("boundary", ["publish", "plan", "effect"])
+@pytest.mark.parametrize("holder", [None, "", "missing", "expired"])
+def test_review_missing_turn_holder_rejects_every_write(stores, boundary, holder):
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    if holder == "expired":
+        assert stores.state.try_acquire_session_turn_lease("session", holder)
+        stores.state._execute_write(lambda conn: conn.execute("UPDATE session_turn_leases SET expires_at=0"))
+    operations = {
+        "publish": lambda: consumer.publish(stores.delivery, [{"role": "assistant", "content": "unsafe"}], 0,
+                                            turn_lease_holder=holder),
+        "plan": lambda: consumer.authorize_staged_turn(stores.delivery, [], turn_lease_holder=holder),
+        "effect": lambda: consumer.effect(stores.delivery, 0, "kanban_comment", {"task_id": stores.task, "body": "unsafe"},
+                                          turn_lease_holder=holder),
+    }
+    with pytest.raises(PermissionError, match="lease"):
+        operations[boundary]()
+    assert len(stores.state.get_messages("session")) == 1
+    assert kb.list_comments(stores.board, stores.task) == []
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_review_dispatch_requires_bound_agent_and_live_turn(stores, native_agent, bound):
+    from agent.completion_inbox_execution import completion_execution, dispatch_completion_tool
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    with completion_execution(consumer, stores.delivery) as execution:
+        execution.agent = native_agent if bound else None
+        result = json.loads(dispatch_completion_tool("kanban_comment", {"task_id": stores.task, "body": "unsafe"}))
+        assert result["error"] == "completion_replay_unsafe"
+        execution.terminal_message = message = {"role": "assistant", "content": "unsafe"}
+        with pytest.raises(PermissionError, match="agent|lease"):
+            execution.flush([message], [message], turn_lease_holder=None)
+    assert len(stores.state.get_messages("session")) == 1
+    assert kb.list_comments(stores.board, stores.task) == []
+
+
+@pytest.mark.parametrize("damage", ["missing", "out_of_range", "mismatched"])
+def test_review_new_effect_requires_exact_durable_plan_slot(stores, damage):
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    assert stores.state.try_acquire_session_turn_lease("session", "planned-turn")
+    args = {"task_id": stores.task, "body": "planned"}
+    if damage != "missing":
+        plan = [{"role": "assistant", "tool_calls": [{"function": {
+            "name": "kanban_comment", "arguments": json.dumps(args)}}]}]
+        consumer.authorize_staged_turn(stores.delivery, plan, turn_lease_holder="planned-turn")
+    slot = 1 if damage == "out_of_range" else 0
+    if damage == "mismatched":
+        args["body"] = "different"
+    with pytest.raises((PermissionError, RuntimeError), match="plan"):
+        consumer.effect(stores.delivery, slot, "kanban_comment", args, turn_lease_holder="planned-turn")
+    assert kb.list_comments(stores.board, stores.task) == []
+    assert stores.board.execute("SELECT COUNT(*) FROM kanban_inbox_effects").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_review_nonquiet_native_execution_emits_nothing_before_receipt(stores, native_agent, monkeypatch, capsys, crash):
+    from agent.agent_init import _CALLBACK_PARAMS
+    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
+    from unittest.mock import Mock
+    owner(stores)
+    consumer = inbox(stores)
+    native_agent.quiet_mode = False
+    native_agent.verbose_logging = True
+    native_agent.save_trajectories = True
+    callbacks = {name: Mock() for name in (*_CALLBACK_PARAMS, "_stream_callback", "_print_fn",
+                                          "background_review_callback", "_on_session_title", "_title_failure_callback")}
+    for name, callback in callbacks.items():
+        setattr(native_agent, name, callback)
+    monkeypatch.setattr(native_agent, "_has_stream_consumers", lambda: False)
+    tool_response = _mock_response(content="interim evidence", tool_calls=[_mock_tool_call(
+        name="kanban_comment", arguments=json.dumps({"task_id": stores.task, "body": "silent comment"}))],
+        finish_reason="tool_calls")
+    calls = iter([tool_response, _mock_response(content="silent final answer")])
+    def response(**kwargs):
+        assert stores.state._read_one("SELECT response_message_id FROM kanban_inbox_transcripts")[0] is None
+        native_agent._fire_stream_delta("premature visible text")
+        native_agent._fire_reasoning_delta("premature reasoning")
+        native_agent._emit_status("premature status")
+        print("premature stdout")
+        return next(calls)
+    native_agent.client.chat.completions.create.side_effect = response
+    capsys.readouterr()
+    original_publish = consumer.publish
+    if crash:
+        def before_receipt(*args, **kwargs):
+            raise KeyboardInterrupt("immediately before receipt")
+        monkeypatch.setattr(consumer, "publish", before_receipt)
+        with pytest.raises(KeyboardInterrupt, match="before receipt"):
+            consumer.run(stores.delivery, native_agent)
+        assert capsys.readouterr() == ("", "")
+        assert not any(callback.called for callback in callbacks.values())
+        assert stores.state._read_one("SELECT response_message_id FROM kanban_inbox_transcripts")[0] is None
+        assert len(kb.list_comments(stores.board, stores.task)) == 1
+        monkeypatch.setattr(consumer, "publish", original_publish)
+        calls = iter([tool_response, _mock_response(content="recovered silent answer")])
+    receipt = consumer.run(stores.delivery, native_agent)
+    assert receipt["response_message_id"] is not None
+    assert capsys.readouterr() == ("", "")
+    assert not any(callback.called for callback in callbacks.values())
+    assert len(kb.list_comments(stores.board, stores.task)) == 1
+    assert stores.state._read_one("SELECT COUNT(*) FROM kanban_inbox_transcripts WHERE response_message_id IS NOT NULL")[0] == 1
+    assert not list(stores.root.rglob("request_dump_*.json"))
+    assert not list(stores.root.rglob("trajectory_samples.jsonl"))
+    assert native_agent.quiet_mode is False
+    assert native_agent.verbose_logging is True
+    assert native_agent.save_trajectories is True
+    for name, callback in callbacks.items():
+        assert getattr(native_agent, name) is callback
+
+
+def test_review_planned_live_effect_replays_committed_identity_once(stores):
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    args = {"task_id": stores.task, "body": "once"}
+    with live_turn(consumer) as holder:
+        authorize_effect(consumer, stores.delivery, holder, args)
+        original = consumer.effect(stores.delivery, 0, "kanban_comment", args, turn_lease_holder=holder)
+        # A committed operation witness takes priority over a missing plan on recovery.
+        stores.state._execute_write(lambda conn: conn.execute("UPDATE kanban_inbox_transcripts SET tool_plan='[]'"))
+        replay = consumer.effect(stores.delivery, 0, "kanban_comment", args, turn_lease_holder=holder)
+        assert replay == original
+        stores.state._execute_write(lambda conn: conn.execute("UPDATE session_turn_leases SET expires_at=0"))
+        with pytest.raises(PermissionError, match="lease"):
+            consumer.effect(stores.delivery, 0, "kanban_comment", args, turn_lease_holder=holder)
+    assert len(kb.list_comments(stores.board, stores.task)) == 1
+    assert stores.board.execute("SELECT COUNT(*) FROM kanban_inbox_effects").fetchone()[0] == 1
+
+
+def test_review_late_worker_silence_preserves_unrelated_thread_output(stores, native_agent, capsys):
+    import contextvars
+    import logging
+    import threading
+    from unittest.mock import Mock
+    from agent.completion_inbox_execution import completion_execution
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    callback = native_agent.status_callback = Mock()
+    logger = logging.getLogger("completion-late-worker-test")
+    handler = logging.StreamHandler()
+    logger.addHandler(handler)
+    try:
+        with completion_execution(consumer, stores.delivery) as execution:
+            execution.agent = native_agent
+            inherited = contextvars.copy_context()
+        assert native_agent.status_callback is callback
+        capsys.readouterr()
+        def late_output():
+            native_agent._emit_status("late unsafe status")
+            print("late unsafe stdout")
+            logger.warning("late unsafe logging")
+        worker = threading.Thread(target=lambda: inherited.run(late_output))
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive()
+        callback.assert_not_called()
+        assert capsys.readouterr() == ("", "")
+        print("ordinary output preserved")
+        assert capsys.readouterr().out == "ordinary output preserved\n"
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def test_review_silent_scope_blocks_direct_observers_dumps_and_deferred_title(stores, native_agent, monkeypatch):
+    from unittest.mock import Mock
+    from agent.completion_inbox_execution import completion_execution
+    from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
+    from agent.request_debug import dump_api_request_debug
+    from agent.turn_context import start_deferred_title_upgrade, _maybe_title_session_at_turn_start
+    from hermes_cli.observability import relay_shared_metrics as metrics
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    raw_config = Mock(return_value={"telemetry": {"shared_metrics": {"enabled": True}}})
+    monkeypatch.setattr(metrics, "_raw_config", raw_config)
+    runtime = Mock(side_effect=AssertionError("metrics runtime reached"))
+    monkeypatch.setattr(metrics, "_get_runtime", runtime)
+    streams = Mock(side_effect=AssertionError("plugin stream callback reached"))
+    monkeypatch.setattr("agent.plugin_stream_hooks._dispatchers_for", streams)
+    title = Mock()
+    monkeypatch.setattr("agent.title_generator.start_title_upgrade", title)
+    subagent_title = Mock()
+    monkeypatch.setattr("agent.title_generator.apply_subagent_title", subagent_title)
+    metric_store = Mock()
+    monkeypatch.setattr("hermes_cli.observability.shared_metrics.SharedMetricsStore", metric_store)
+    monkeypatch.setattr(metrics, "_consent_reconcile_done", False)
+    native_agent.platform = "subagent"
+    native_agent._deferred_title_upgrade = object()
+    native_agent._context_probed = True
+    with completion_execution(consumer, stores.delivery) as execution:
+        execution.agent = native_agent
+        assert not metrics.enabled()
+        metrics.record_process_mark("unused", {})
+        metrics.observe_lifecycle("pre_llm_call")
+        assert not enqueue_plugin_stream_hook("on_stream_delta", delta="unsafe")
+        assert dump_api_request_debug(native_agent, {"messages": ["unsafe"]}, reason="test") is None
+        start_deferred_title_upgrade(native_agent)
+        _maybe_title_session_at_turn_start(native_agent, [], "unsafe title")
+    raw_config.assert_not_called()
+    runtime.assert_not_called()
+    streams.assert_not_called()
+    title.assert_not_called()
+    subagent_title.assert_not_called()
+    metric_store.assert_not_called()
+    assert metrics._consent_reconcile_done is False
+    assert not list(stores.root.rglob("request_dump_*.json"))
+
+
+def test_review_inline_provider_watchdogs_inherit_silence(stores, native_agent, monkeypatch, capsys, caplog):
+    import threading
+    from unittest.mock import Mock
+    from agent import chat_completion_helpers as api
+    from agent.completion_inbox_execution import completion_execution
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    native_agent.platform = "cron"
+    native_agent.quiet_mode = False
+    persist = Mock()
+    status = Mock()
+    monkeypatch.setattr(native_agent, "_persist_session_activity_if_due", persist)
+    monkeypatch.setattr(native_agent, "status_callback", status)
+    monkeypatch.setattr(native_agent, "_compute_non_stream_stale_timeout", lambda kwargs: 0.05)
+    monkeypatch.setattr(api, "_DIRECT_API_ACTIVITY_HEARTBEAT_SECONDS", 0.005)
+    monkeypatch.setattr(native_agent, "_create_request_openai_client", lambda **kwargs: native_agent.client)
+    monkeypatch.setattr(native_agent, "_abort_request_openai_client", lambda *args, **kwargs: None)
+    monkeypatch.setattr(native_agent, "_close_request_openai_client", lambda *args, **kwargs: None)
+    reported = threading.Event()
+    original = api._report_stale_nonstream_kill
+    def report(*args, **kwargs):
+        try:
+            original(*args, **kwargs)
+        finally:
+            reported.set()
+    monkeypatch.setattr(api, "_report_stale_nonstream_kill", report)
+    def dispatch(agent, kwargs, *, make_client):
+        make_client("test")
+        assert reported.wait(5), "native inline watchdog did not run"
+        raise OSError("aborted provider")
+    monkeypatch.setattr(api, "_dispatch_nonstreaming_api_request", dispatch)
+    capsys.readouterr()
+    caplog.clear()
+    with completion_execution(consumer, stores.delivery) as execution:
+        execution.agent = native_agent
+        assert api.should_use_direct_api_call(native_agent)
+        with pytest.raises(TimeoutError):
+            api.direct_api_call(native_agent, {"model": "test", "messages": []})
+    persist.assert_not_called()
+    status.assert_not_called()
+    assert capsys.readouterr() == ("", "")
+    assert not caplog.records
+
+
+def test_review_oversized_rejected_tool_never_spills_or_resolves_remote_environment(stores, native_agent, monkeypatch):
+    from unittest.mock import Mock
+    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
+    from tools.budget_config import BudgetConfig
+    from agent import tool_executor
+    owner(stores)
+    consumer = inbox(stores)
+    name = "unsafe_tool_" * 10_000
+    native_agent.valid_tool_names.add(name)
+    native_agent.client.chat.completions.create.side_effect = [
+        _mock_response(tool_calls=[_mock_tool_call(name=name, arguments="{}")], finish_reason="tool_calls"),
+        _mock_response(content="bounded safe refusal"),
+    ]
+    spill = Mock(side_effect=AssertionError("completion spill persistence reached"))
+    remote = Mock()
+    budget = Mock(side_effect=AssertionError("completion budget persistence reached"))
+    monkeypatch.setattr(tool_executor, "maybe_persist_tool_result", spill)
+    monkeypatch.setattr(tool_executor, "get_active_env", remote)
+    monkeypatch.setattr(tool_executor, "enforce_turn_budget", budget)
+    monkeypatch.setattr(tool_executor, "_budget_for_agent", lambda agent: BudgetConfig(default_result_size=32, turn_budget=32))
+    receipt = consumer.run(stores.delivery, native_agent)
+    assert receipt["response_message_id"] is not None
+    spill.assert_not_called()
+    remote.assert_not_called()
+    budget.assert_not_called()
+    tool = next(message for message in stores.state.get_messages("session") if message["role"] == "tool")
+    assert len(tool["content"]) <= 32
+    assert not list(stores.root.rglob("spillover/*"))
+    assert kb.list_comments(stores.board, stores.task) == []
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_review_native_seam_discards_every_result_envelope(stores, native_agent, monkeypatch, failed):
+    from agent.completion_inbox_execution import completion_execution
+    from agent.completion_inbox_native import run_native_turn
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    monkeypatch.setattr("agent.conversation_loop.run_conversation", lambda *args, **kwargs: {
+        "final_response": "unsafe early response", "messages": [{"role": "assistant", "content": "unsafe"}],
+        "failed": failed, "interrupted": False})
+    with completion_execution(consumer, stores.delivery) as execution:
+        execution.agent = native_agent
+        result = run_native_turn(execution, native_agent, "marker", None, [], stores.delivery)
+    assert result["final_response"] == ""
+    assert result["messages"] == []
+    assert result["failed"] is failed
+    assert len(stores.state.get_messages("session")) == 1
+
+
+@pytest.mark.parametrize("kind", ["provider", "periodic"])
+def test_review_worker_failure_stays_silent_after_parent_exit(stores, monkeypatch, capsys, caplog, kind):
+    import logging
+    import threading
+    from unittest.mock import Mock
+    from agent.chat_completion_helpers import _context_thread_target
+    from agent.periodic_scheduler import PeriodicScheduler
+    from agent.completion_inbox_execution import completion_execution
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    ready = threading.Event()
+    release = threading.Event()
+    hook = Mock()
+    monkeypatch.setattr(threading, "excepthook", hook)
+    caplog.set_level(logging.DEBUG, logger="agent.periodic_scheduler")
+    def fail():
+        ready.set()
+        assert release.wait(5), "worker release was lost"
+        raise KeyboardInterrupt("unsafe worker traceback") if kind == "provider" else RuntimeError("unsafe periodic log")
+    with completion_execution(consumer, stores.delivery):
+        if kind == "provider":
+            worker = threading.Thread(target=_context_thread_target(fail))
+            worker.start()
+        else:
+            handle = PeriodicScheduler().schedule(fail, 0.005)
+        assert ready.wait(5)
+    capsys.readouterr()
+    caplog.clear()
+    release.set()
+    if kind == "provider":
+        worker.join(5)
+        assert not worker.is_alive()
+    else:
+        handle.cancel(wait=5)
+    hook.assert_not_called()
+    assert capsys.readouterr() == ("", "")
+    assert not caplog.records
+
+
+def test_review_completion_rate_limit_state_is_read_only(stores, monkeypatch):
+    from agent import nous_rate_guard as guard
+    from agent.completion_inbox_execution import completion_execution
+    owner(stores)
+    consumer = inbox(stores)
+    consumer.claim(stores.delivery)
+    consumer.admit(stores.delivery)
+    path = stores.root / "rate_limit.json"
+    monkeypatch.setattr(guard, "_state_path", lambda **kwargs: str(path))
+    with completion_execution(consumer, stores.delivery):
+        guard.record_nous_rate_limit()
+    assert not path.exists()
+    path.write_text(json.dumps({"reset_at": time.time() + 600}))
+    original = path.read_bytes()
+    with completion_execution(consumer, stores.delivery):
+        assert guard.nous_rate_limit_remaining() > 0
+        guard.record_nous_rate_limit()
+        guard.clear_nous_rate_limit()
+    assert path.read_bytes() == original
+    path.write_text(json.dumps({"reset_at": 0}))
+    with completion_execution(consumer, stores.delivery):
+        assert guard.nous_rate_limit_remaining() is None
+    assert path.exists()
+    guard.clear_nous_rate_limit()
+    assert not path.exists()
+
+
+def test_review_native_error_cannot_activate_fallback_or_rewrite_prompt(stores, native_agent, monkeypatch):
+    import httpx
+    import openai
+    from unittest.mock import Mock
+    owner(stores)
+    consumer = inbox(stores)
+    native_agent._fallback_chain = [{"provider": "anthropic", "model": "unreviewed"}]
+    native_agent._fallback_index = 0
+    resolver = Mock(side_effect=AssertionError("fallback resolver reached"))
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", resolver)
+    monkeypatch.setattr("hermes_cli.fallback_config.resolve_entry_api_key", lambda entry: "test-key")
+    error = openai.BadRequestError("invalid test request", response=httpx.Response(
+        400, request=httpx.Request("POST", "https://example.invalid")), body={"error": "bad_request"})
+    native_agent.client.chat.completions.create.side_effect = error
+    prompt = native_agent._cached_system_prompt
+    with pytest.raises(RuntimeError, match="receipt"):
+        consumer.run(stores.delivery, native_agent)
+    resolver.assert_not_called()
+    assert native_agent.client.chat.completions.create.call_count == 1
+    assert native_agent._cached_system_prompt == prompt
+    assert native_agent._fallback_activated is False
+
+
+def test_review_agent_already_on_fallback_is_rejected(stores, native_agent):
+    owner(stores)
+    native_agent._fallback_activated = True
+    with pytest.raises(PermissionError, match="runtime"):
+        inbox(stores).run(stores.delivery, native_agent)
+    native_agent.client.chat.completions.create.assert_not_called()
+
+
+def test_review_cached_full_prompt_is_used_without_static_reconstruction(stores, native_agent, monkeypatch):
+    from unittest.mock import Mock
+    from tests.agent.test_run_agent import _mock_response
+    owner(stores)
+    builder = Mock(side_effect=AssertionError("completion rebuilt prompt sources"))
+    monkeypatch.setattr("agent.system_prompt.build_system_prompt_parts", builder)
+    native_agent._use_prompt_caching = True
+    native_agent._cached_system_prompt_static = None
+    original = native_agent._cached_system_prompt
+    native_agent.client.chat.completions.create.return_value = _mock_response(content="cached completion")
+    receipt = inbox(stores).run(stores.delivery, native_agent)
+    assert receipt["response_message_id"] is not None
+    builder.assert_not_called()
+    assert native_agent._cached_system_prompt == original
+    assert native_agent._cached_system_prompt_static is None

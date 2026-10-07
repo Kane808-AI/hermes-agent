@@ -31,6 +31,8 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
+from agent.completion_inbox_output import bounded_result, bound_completion_batch
+from agent.completion_inbox_silence import is_silent
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
@@ -1115,7 +1117,9 @@ def _commit_tool_result(
     agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
 
     persisted_result = function_result
-    if _is_multimodal_tool_result(persisted_result):
+    if is_silent():
+        persisted_result = bounded_result(persisted_result, budget.default_result_size)
+    elif _is_multimodal_tool_result(persisted_result):
         persisted_result = _persist_multimodal_text_parts(
             persisted_result, function_name, tool_call_id, get_active_env(effective_task_id), budget,
         )
@@ -1204,7 +1208,8 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
         return
     batch = messages[-num_tools:]
     contents_before = [message.get("content") for message in batch]
-    enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
+    if not bound_completion_batch(batch, budget):
+        enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
     record_tool_batch(agent, batch, contents_before)
     agent._apply_pending_steer_to_tool_results(messages, num_tools)
 

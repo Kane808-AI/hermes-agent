@@ -191,6 +191,9 @@ def _maybe_title_session_at_turn_start(
     agent: Any, messages: List[Any], title_user_message: Optional[str] = None,
 ) -> None:
     """Kick off auto-titling for the session's first user message; never fatal."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     session_db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", None)
     if not session_db or not session_id:
@@ -263,6 +266,9 @@ def _maybe_title_session_at_turn_start(
 
 def start_deferred_title_upgrade(agent: Any) -> None:
     """Fire the title upgrade ``_maybe_title_session_at_turn_start`` held back; no-op when none."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     upgrade = getattr(agent, "_deferred_title_upgrade", None)
     if upgrade is None:
         return

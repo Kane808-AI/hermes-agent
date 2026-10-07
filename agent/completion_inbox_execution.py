@@ -36,6 +36,7 @@ class CompletionExecution:
             raise PermissionError("completion execution must use the owning profile/session")
         from agent.context_compressor import ContextCompressor
         if agent.api_mode != "chat_completions" or agent.provider == "moa" \
+                or agent._fallback_activated \
                 or agent.compression_enabled or agent._memory_manager \
                 or type(agent.context_compressor) is not ContextCompressor \
                 or agent.context_compressor._micro_compact_enabled or not agent.skip_background_review:
@@ -58,6 +59,7 @@ class CompletionExecution:
         return matches[0]
 
     def flush(self, rows, messages, *, turn_lease_holder, compression_lock_holder=None):
+        self.require_bound_turn(turn_lease_holder)
         # Tool-loop flushes stage output in memory. Only a designated terminal
         # response can commit it, together with its receipt in one transaction.
         if self.terminal_message is None:
@@ -80,15 +82,26 @@ class CompletionExecution:
             self._slot += 1
         try:
             holder = getattr(self.agent, "_active_session_turn_lease_holder", None)
-            if self.agent is not None and holder is None:
-                raise PermissionError("native completion effect requires its admitted turn lease")
+            self.require_bound_turn(holder)
             return self.inbox.effect(self.delivery_id, slot, name, args, turn_lease_holder=holder)
         except (PermissionError, RuntimeError, ValueError) as error:
             return json.dumps({"error": "completion_replay_unsafe", "reason": str(error)})
 
+    def require_bound_turn(self, holder):
+        if self.agent is None:
+            raise PermissionError("completion execution requires a bound native agent")
+        self.validate_agent(self.agent)
+        if not holder or holder != getattr(self.agent, "_active_session_turn_lease_holder", None):
+            raise PermissionError("native completion execution requires its admitted turn lease")
+
     def run(self, agent):
         self.validate_agent(agent)
         self.agent = agent
+        from agent.completion_inbox_silence import preserve_callbacks
+        with preserve_callbacks(agent):
+            self._run_bound_agent(agent)
+
+    def _run_bound_agent(self, agent):
         if self.record["response_message_id"] is not None:
             return
         history = self.inbox.state.get_messages_as_conversation(
@@ -104,7 +117,9 @@ def completion_execution(inbox, delivery_id):
     execution = CompletionExecution(inbox, delivery_id)
     token = _EXECUTION.set(execution)
     try:
-        yield execution
+        from agent.completion_inbox_silence import silent_scope
+        with silent_scope():
+            yield execution
     finally:
         _EXECUTION.reset(token)
 

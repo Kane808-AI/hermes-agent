@@ -15,6 +15,7 @@ import os
 import time
 from typing import Any, Mapping, Optional
 from utils import atomic_write_text
+from agent.completion_inbox_silence import is_silent
 from agent.retry_utils import parse_retry_after_seconds
 from agent.rate_limit_tracker import (
     _BUCKET_TAGS, _fmt_seconds, _safe_float, _safe_int, has_rate_limit_headers, lower_headers,
@@ -67,6 +68,8 @@ def record_nous_rate_limit(
     Reset time comes from headers, then ``error_context["reset_at"]`` (body
     parsing), then ``default_cooldown``.
     """
+    if is_silent():
+        return
     now = time.time()
     reset_at = None
     header_seconds = _parse_reset_seconds(headers)
@@ -96,8 +99,9 @@ def nous_rate_limit_remaining(*, anonymous: bool = False) -> Optional[float]:
         remaining = state.get("reset_at", 0) - time.time()
         if remaining > 0:
             return remaining
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+        if not is_silent():
+            with contextlib.suppress(OSError):
+                os.unlink(path)
         return None
     except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
         return None
@@ -105,6 +109,8 @@ def nous_rate_limit_remaining(*, anonymous: bool = False) -> Optional[float]:
 
 def clear_nous_rate_limit(*, anonymous: bool = False) -> None:
     """Clear the rate limit state (e.g., after a successful Nous request)."""
+    if is_silent():
+        return
     try:
         os.unlink(_state_path(anonymous=anonymous))
     except FileNotFoundError:

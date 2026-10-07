@@ -146,6 +146,7 @@ from agent.rate_limit_credits import RateLimitCreditsMixin
 from agent.session_persistence import SessionPersistenceMixin
 from agent.compression_facade import CompressionFacadeMixin
 from agent.turn_facade import TurnFacadeMixin
+from agent.completion_inbox_silence import CompletionSilenceMixin
 from agent.vision_message_prep import VisionMessagePrepMixin
 from agent.reasoning_params import ReasoningParamsMixin
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
@@ -239,7 +240,7 @@ class _StreamErrorEvent(Exception):
 
 
 class AIAgent(
-    ClientLifecycleMixin, StreamDeliveryMixin, StatusOutputMixin, ApiRequestHooksMixin, ApiErrorSummaryMixin,
+    CompletionSilenceMixin, ClientLifecycleMixin, StreamDeliveryMixin, StatusOutputMixin, ApiRequestHooksMixin, ApiErrorSummaryMixin,
     InterruptControlMixin, TurnExplainersMixin, ActivityTrackingMixin, RateLimitCreditsMixin,
     SessionPersistenceMixin, CompressionFacadeMixin, TurnFacadeMixin, VisionMessagePrepMixin, ReasoningParamsMixin,
 ):

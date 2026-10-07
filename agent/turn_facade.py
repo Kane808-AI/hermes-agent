@@ -31,6 +31,16 @@ class TurnFacadeMixin:
         title_user_message: Optional[str]=None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
+        from agent.completion_inbox_execution import current_execution
+        completion = current_execution()
+        if completion is not None:
+            from agent.completion_inbox_native import run_native_turn
+            return run_native_turn(completion, self, user_message, system_message, conversation_history, task_id,
+                                   stream_callback=stream_callback, persist_user_message=persist_user_message,
+                                   persist_user_timestamp=persist_user_timestamp, persist_user_display_kind=persist_user_display_kind,
+                                   persist_user_display_metadata=persist_user_display_metadata,
+                                   persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
+                                   turn_author=turn_author, title_user_message=title_user_message)
         # A review shares this session_id for cache parity: fence review startup or interrupt
         # an admitted request and await its exit before opening live-turn instrumentation.
         # Foreground priority is retained if the review does not acknowledge within the bounded deadline
@@ -97,10 +107,6 @@ class TurnFacadeMixin:
                 return admission.early_result
             lease = admission.lease
             conversation_history = admission.conversation_history
-            from agent.completion_inbox_execution import committed_completion_result
-            completion_result = committed_completion_result(self)
-            if completion_result is not None:
-                return completion_result
 
             relay_session_cwd, relay_turn_cwd = resolve_relay_scope_cwds(
                 self,

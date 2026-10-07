@@ -22,6 +22,7 @@ failure never retires the handle: it is re-queued and logged at warning.
 from __future__ import annotations
 
 from contextvars import copy_context
+from agent.completion_inbox_silence import worker_target
 import heapq
 import itertools
 import logging
@@ -97,9 +98,9 @@ class PeriodicScheduler:
         handle._runner = runner
         try:
             runner.start()
-        except Exception:
+        except RuntimeError:
             handle._runner = None
-            logger.warning(
+            handle._context.run(logger.warning,
                 "failed to start periodic callback worker %r; retrying in %s s",
                 handle._fn,
                 handle._interval,
@@ -114,9 +115,12 @@ class PeriodicScheduler:
         heapq.heappush(self._heap, (time.monotonic() + handle._interval, next(self._seq), handle))
 
     def _run_callback(self, handle: ScheduledHandle) -> None:
+        worker_target(lambda: self._run_bound_callback(handle), context=handle._context)()
+
+    def _run_bound_callback(self, handle: ScheduledHandle) -> None:
         stop = False
         try:
-            stop = handle._context.run(handle._fn) is False
+            stop = handle._fn() is False
         except Exception:
             logger.debug("periodic callback %r raised", handle._fn, exc_info=True)
         finally:

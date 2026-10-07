@@ -519,6 +519,10 @@ def apply_llm_output_transform(
     return final_response, transformed, pre_transform
 
 
+from agent.completion_inbox_silence import completion_finalizer
+
+
+@completion_finalizer
 def finalize_turn(
     agent, *, final_response, api_call_count, interrupted, failed, messages, conversation_history,
     effective_task_id, turn_id, user_message, original_user_message, _should_review_memory,

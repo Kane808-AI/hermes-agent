@@ -163,7 +163,8 @@ def record_response_usage(
     # Persist only provider-confirmed context lengths, not probe tiers.
     if getattr(compressor, "_context_probed", False):
         ctx = compressor.context_length
-        if getattr(compressor, "_context_probe_persistable", False):
+        from agent.completion_inbox_silence import can_persist_context_probe
+        if can_persist_context_probe(compressor):
             from agent.model_metadata import save_provider_context_length
 
             save_provider_context_length(agent.model, agent.base_url, ctx, agent.provider)
@@ -248,7 +249,8 @@ def record_response_usage(
     # accounting; gateway/session-store writes use absolute totals and safely overwrite
     # these deltas. Enqueued, not written (a cold state.db UPDATE here stalled the tool
     # loop); drained at finalize via _persist_session.
-    if agent._session_db and agent.session_id:
+    from agent.completion_inbox_silence import accounting_store
+    if accounting_store(agent) and agent.session_id:
         try:
             # Ensure the row exists: under concurrent SQLite load the initial
             # _ensure_db_session() may fail, and UPDATE on a missing row affects 0 rows.

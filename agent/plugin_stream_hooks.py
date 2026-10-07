@@ -132,6 +132,9 @@ def _dispatchers_for(hook_name: str) -> list[_ConsumerDispatcher]:
 
 def enqueue_plugin_stream_hook(hook_name: str, **payload: Any) -> bool:
     """Queue an observer hook for each consumer without running plugin code inline."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return False
     queued = False
     item = (contextvars.copy_context(), dict(payload))
     for dispatcher in _dispatchers_for(hook_name):
