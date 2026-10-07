@@ -236,3 +236,18 @@ in [Kanban Completion Inbox saga](kanban-completion-inbox-saga.md). The receipt 
 the approved base `4500a0f640f2d15a22e694435cc7a061586c35a5` with the Phase 2 revision,
 including exact failing test IDs and causes. All consumer flags remain false, activation
 remains refused, and no Phase 3 or later integration is included.
+
+Phase 2 implementation: `29b19d1ffbdbfae866729cf03ee63d6720493cc3`.
+Verified on 2026-10-07: **146 foundation/saga tests passed** (85 foundation plus 61 new
+Phase 2 cases). The documented 26-file command and unchanged approved base both returned
+**284 passed, 17 failed, 1 skipped, 10 strict xfailed**, with identical failure IDs and causes.
+The 16 affected persistence/effect files and their unchanged base both returned **142 passed,
+46 failed, 2 setup errors, 1 skipped**, all failures/errors from the existing home-I/O guard.
+An isolated candidate snapshot passed **190 affected tests, with 1 skip**. Red-on-base evidence
+and exact commands are in the saga receipt. `python scripts/check` passed all **11 checks**
+with **0 code-health blockers and 0 advisories**. Both unstaged and staged whitespace checks
+passed. No Phase 2 run encountered the historical WAL-preflight race.
+
+Consumers remain disabled and activation remains refused. Phase 2 is ready for independent
+review. No Phase 3 work, live database migration, service restart, production configuration
+change, push, or merge occurred.

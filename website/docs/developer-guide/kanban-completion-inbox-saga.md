@@ -4,7 +4,8 @@ title: Kanban Completion Inbox saga
 
 Implementation scope: Phase 2 of plan `plan-0045009c16e345dd`, starting from
 `4500a0f640f2d15a22e694435cc7a061586c35a5` on `feat/completion-inbox-phase01`.
-Implementation revision: recorded after committing the implementation.
+Implementation revision: `29b19d1ffbdbfae866729cf03ee63d6720493cc3`.
+The subsequent documentation-only commit records this exact revision in both receipts.
 This is an explicit native seam. No consumer is started or enabled.
 
 ## Durable identities and authority
