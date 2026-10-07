@@ -252,6 +252,35 @@ def inventory(root, workflows, roots, context, shards):
     return jobs, skipped, seen
 
 
+def aggregate_policy_matches(gate, baseline):
+    """Allow only adding boolean false credential persistence to an existing checkout."""
+    normalized = dict(gate)
+    steps = gate.get("steps", [])
+    original_steps = baseline.get("steps", [])
+    if len(steps) != len(original_steps):
+        return False
+    normalized_steps = []
+    for step, original in zip(steps, original_steps):
+        step = dict(step)
+        uses = original.get("uses", "")
+        original_inputs = original.get("with", {})
+        inputs = step.get("with", {})
+        if (uses.startswith("actions/checkout@") and step.get("uses") == uses
+                and "persist-credentials" not in original_inputs
+                and inputs.get("persist-credentials") is False):
+            inputs = dict(inputs)
+            del inputs["persist-credentials"]
+            if inputs or "with" in original:
+                step["with"] = inputs
+            else:
+                del step["with"]
+        normalized_steps.append(step)
+    if "steps" in gate:
+        normalized["steps"] = normalized_steps
+    # JSON preserves boolean-vs-number distinctions that Python equality erases.
+    return json.dumps(normalized, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
@@ -304,7 +333,7 @@ def main():
     from scripts.run_tests_parallel import _discover_files, _slice_files
     gate = workflows["ci.yaml"]["jobs"]["all-checks-pass"]
     baseline = load(subprocess.check_output(["git", "show", f"{args.base}:.github/workflows/ci.yaml"], text=True, timeout=30))
-    if gate != baseline["jobs"]["all-checks-pass"]:
+    if not aggregate_policy_matches(gate, baseline["jobs"]["all-checks-pass"]):
         raise ValueError("aggregate policy changed; separate review required")
     for job in gate["needs"]:
         for result in ("failure", "cancelled", "", None, "unknown"):
