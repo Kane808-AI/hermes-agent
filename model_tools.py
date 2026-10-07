@@ -889,6 +889,10 @@ def handle_function_call(
     it (single-fire contract). enabled/disabled_toolsets scope the Tool Search
     bridge catalog to this session's grant (None = unrestricted).
     """
+    from agent.completion_inbox_execution import dispatch_completion_tool
+    completion_result = dispatch_completion_tool(function_name, function_args)
+    if completion_result is not None:
+        return completion_result
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
         function_args = {}

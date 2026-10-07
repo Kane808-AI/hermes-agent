@@ -203,6 +203,10 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
     the call starts a NEW run after the conflicting one lands. Runs shorter than two calls
     demote to sequential (it owns the richer inline dispatch); adjacent sequential merge.
     """
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        # Durable operation slots follow model call order, even on inference replay.
+        return [("sequential", list(tool_calls))]
     segments: List[tuple] = []
     current: list = []
     reserved_paths: list[tuple[Path, bool]] = []  # (canonical_path, is_writer) for the current run

@@ -63,6 +63,8 @@ class TurnFacadeMixin:
             "platform": getattr(self, "platform", None) or "",
         }
         relay_turn_id = f"{session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+        from agent.completion_inbox_execution import completion_turn_id
+        relay_turn_id = completion_turn_id(self, relay_turn_id)
         self._relay_pending_turn_id = relay_turn_id
         relay_parent_session_id = (
             str(getattr(self, "_parent_session_id", None) or "")
@@ -95,6 +97,10 @@ class TurnFacadeMixin:
                 return admission.early_result
             lease = admission.lease
             conversation_history = admission.conversation_history
+            from agent.completion_inbox_execution import committed_completion_result
+            completion_result = committed_completion_result(self)
+            if completion_result is not None:
+                return completion_result
 
             relay_session_cwd, relay_turn_cwd = resolve_relay_scope_cwds(
                 self,

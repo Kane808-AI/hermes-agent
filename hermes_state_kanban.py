@@ -29,13 +29,25 @@ CREATE TABLE IF NOT EXISTS kanban_return_routes (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kanban_routes_session ON kanban_return_routes(session_id);
+CREATE TABLE IF NOT EXISTS kanban_return_route_owners (
+    return_route_id TEXT PRIMARY KEY,
+    board_uuid TEXT NOT NULL,
+    owner_state_path TEXT NOT NULL
+);
+INSERT OR IGNORE INTO kanban_return_route_owners
+    SELECT return_route_id,board_uuid,owner_state_path FROM kanban_return_routes;
+CREATE TRIGGER IF NOT EXISTS kanban_route_owner_immutable BEFORE UPDATE ON kanban_return_route_owners
+BEGIN SELECT RAISE(ABORT, 'route ownership is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS kanban_route_owner_retained BEFORE DELETE ON kanban_return_route_owners
+BEGIN SELECT RAISE(ABORT, 'route ownership is retained'); END;
 CREATE TABLE IF NOT EXISTS kanban_session_consumers (
     session_id TEXT PRIMARY KEY,
     consumer_fence INTEGER NOT NULL DEFAULT 0,
     lease_owner TEXT,
     lease_expires_at INTEGER,
     owner_pid INTEGER,
-    owner_started_at REAL
+    owner_started_at REAL,
+    session_started_at REAL
 );
 CREATE TRIGGER IF NOT EXISTS kanban_return_route_immutable BEFORE UPDATE ON kanban_return_routes
 BEGIN SELECT RAISE(ABORT, 'return route is immutable'); END;
@@ -49,6 +61,10 @@ def prepare_route_migration(conn, path) -> None:
         row = conn.execute("SELECT version FROM kanban_route_schema WHERE singleton=1").fetchone()
         if row is None or row[0] != KANBAN_ROUTE_SCHEMA_VERSION:
             raise RuntimeError("incompatible Kanban return-route schema")
+        consumers = {r[1] for r in conn.execute("PRAGMA table_info(kanban_session_consumers)")}
+        owners = conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_return_route_owners'").fetchone()
+        if "session_started_at" not in consumers or owners is None:
+            migration_backup(conn, path, "kanban-completion-profile-v1")
         return
     migration_backup(conn, path, "kanban-routes-v1")
 
@@ -97,6 +113,8 @@ class SessionKanbanRoutesMixin:
             conn.execute("INSERT INTO kanban_return_routes VALUES (?,?,?,?,?,?,?)",
                          (route_id, board_uuid, session_id, row[1], str(self.db_path.resolve()),
                           surface, int(time.time())))
+            conn.execute("INSERT INTO kanban_return_route_owners VALUES (?,?,?)",
+                         (route_id, board_uuid, str(self.db_path.resolve())))
         self._execute_write(create)
         return route_id
 

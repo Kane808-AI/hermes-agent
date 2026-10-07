@@ -4,6 +4,8 @@ title: Kanban completion foundation
 
 Implementation scope: Phases 0 and 1 of approved plan `plan-0045009c16e345dd`.
 This foundation captures delivery obligations. It does not execute completion turns.
+The separately authorized [Phase 2 saga](kanban-completion-inbox-saga.md) now supplies
+explicit native execution. Consumers remain disabled.
 
 ## Producer inventory
 
@@ -119,15 +121,16 @@ exist, then passed after implementation. Strict expected failures keep later gap
 
 - Interactive CLI capture is missing, despite a persisted originating CLI session (Phase 3).
 - The legacy TUI cursor consumes a completion before a durable linked receipt, at the
-  after-claim, after-marker, after-answer, and before-receipt crash boundaries (Phases 2/6).
+  after-claim, after-marker, after-answer, and before-receipt crash boundaries (Phase 6).
 - Terminal idle/busy/closing/closed/reopened ownership has no durable monotonic consumer
   fence (Phase 4). Existing liveness leases are not upgraded in this slice.
 
-The Phase 2 saga remains unimplemented. Before activating any consumer it must provide
-idempotent transcript markers, delivery/turn-linked assistant receipts, fenced CAS
-transitions, reconciliation by exact IDs, and side-effect idempotency. Session lease
-operations and surface integration follow their separately approved phases. A route
-record without an execution receipt is not proof that Atlas processed a completion.
+The [Phase 2 saga](kanban-completion-inbox-saga.md) implements explicit native admission,
+linked receipts, fenced transitions, exact reconciliation, and transactional comment
+idempotency. Its passing crash tests are separate from the four legacy TUI expected
+failures. Consumer lease acquisition, heartbeat, foreground ownership, and surface
+integration remain in later phases. A route record without an execution receipt is not
+proof that Atlas processed a completion. Consumer activation is still refused.
 
 ## Verification receipt
 
@@ -177,9 +180,7 @@ scripts/run_tests.sh \
 
 ### Phase 0/1 review follow-up
 
-Follow-up revision: the commit containing this receipt, directly after the reviewed commit.
-Resolve its exact hash with
-`git log -1 --format=%H -- website/docs/developer-guide/kanban-completion-foundation.md`.
+Follow-up revision: `4500a0f640f2d15a22e694435cc7a061586c35a5`, directly after the reviewed commit.
 The follow-up remains on `feat/completion-inbox-phase01`.
 
 The six foundation files passed **85 tests with no failures**. This run includes the original
@@ -222,8 +223,16 @@ canonical runner. They were not modified or hidden:
 | `tests/hermes_cli/test_kanban_db.py` | 1 | `test_infrastructure_spawn_refusal_never_charges_the_card` expects an empty `auto_blocked` list but receives the task ID. |
 
 These pre-existing failures remain a verification limitation for subsequent work.
-The four Phase 0/1 review blockers are resolved. Phase 2 implementation is unblocked.
-Consumer activation remains blocked by the
+At revision `4500a0f640f2d15a22e694435cc7a061586c35a5`, the four Phase 0/1 review blockers
+were resolved and Phase 2 implementation was unblocked. Consumer activation remained blocked by the
 unimplemented linked-receipt saga, fencing, reconciliation, and side-effect guards.
 Phase 2 was not started. No JEV, hosted egress, gateway fallback, historical replay,
 or production-configuration change was introduced.
+
+### Phase 2 verification
+
+The separately authorized Phase 2 implementation and its verification receipt are recorded
+in [Kanban Completion Inbox saga](kanban-completion-inbox-saga.md). The receipt compares
+the approved base `4500a0f640f2d15a22e694435cc7a061586c35a5` with the Phase 2 revision,
+including exact failing test IDs and causes. All consumer flags remain false, activation
+remains refused, and no Phase 3 or later integration is included.

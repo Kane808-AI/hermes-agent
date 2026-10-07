@@ -748,6 +748,9 @@ def maybe_auto_title(
 
     Returns the upgrade thread: already started, or — when ``title_upgrade_must_wait_for_turn`` — left
     UNSTARTED for the caller to hand to ``start_title_upgrade`` once the turn's model request settled."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return None
     if not session_db or not session_id or not user_message:
         return None
     # History may be pre- or post-message. Past the opening turn, skip once the session holds an

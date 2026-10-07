@@ -705,6 +705,11 @@ def _dispatch_authorized_once(
             callback()
 
     block_message, block_error_type = scope_block, "tool_scope_block"
+    from agent.completion_inbox_execution import completion_tool_rejection, dispatch_completion_tool
+    completion_result = completion_tool_rejection(ref.name)
+    if completion_result is not None:
+        _advance_start_order()
+        return completion_result
     if block_message is None:
         block_error_type = "plugin_block"
         resolve = lambda: _pre_tool_block(agent, ref)  # noqa: E731
@@ -743,6 +748,11 @@ def _dispatch_authorized_once(
         agent._turns_since_memory = 0
     elif ref.name == "skill_manage":
         agent._iters_since_skill = 0
+
+    completion_result = dispatch_completion_tool(ref.name, ref.args)
+    if completion_result is not None:
+        _advance_start_order()
+        return completion_result
 
     from agent.terminal_approval_batch import prepare_current_terminal
     prepare_current_terminal(ref)
@@ -1553,6 +1563,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """Execute tool calls concurrently; results are appended in original call order.
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
     segmented dispatcher owns turn-end work)."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return execute_tool_calls_sequential(agent, assistant_message, messages, effective_task_id, api_call_count, finalize=finalize)
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result

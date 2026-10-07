@@ -249,6 +249,8 @@ def reset_transferred_delivery_state(conn: sqlite3.Connection) -> None:
         return
     for name in DELIVERY_TRIGGER_NAMES:
         conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    for table in ("kanban_inbox_effects", "kanban_inbox_schema"):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
     for table in ("kanban_deliveries", "kanban_delivery_control", "kanban_board_identity"):
         conn.execute(f"DROP TABLE {table}")
     conn.execute("UPDATE tasks SET return_route_id=NULL, origin_interactive=0")
