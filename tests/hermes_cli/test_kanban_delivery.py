@@ -185,10 +185,14 @@ def test_concurrent_initializers_keep_one_board_identity(tmp_path):
         assert len(set(pool.map(initialize, range(8)))) == 1
 
 
-def test_later_consumer_flags_cannot_activate_in_phase_one(board):
+def test_only_phase_four_cli_consumer_flag_is_supported(board):
     from hermes_cli.kanban_delivery import configure_producer
 
-    for flag in ("cli_enabled", "gateway_enabled", "tui_enabled", "repair_enabled"):
+    policy = configure_producer(
+        board, {"kanban": {"completion_inbox": {"cli_enabled": True}}}
+    )
+    assert policy.cli_enabled
+    for flag in ("gateway_enabled", "tui_enabled", "repair_enabled"):
         with pytest.raises(RuntimeError, match="later phase"):
             configure_producer(board, {"kanban": {"completion_inbox": {flag: True}}})
     assert board.execute("SELECT producer_enabled FROM kanban_delivery_control").fetchone()[0] == 0

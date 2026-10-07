@@ -28,8 +28,9 @@ def process_identity() -> tuple[int, int]:
 class CompletionInbox:
     """Native orchestration derives authority from an already-owned durable session.
 
-    Phase 4 will provision the reserved consumer rows. This class cannot acquire,
-    renew, or accept a caller-supplied fence. All writes lock profile before board.
+    Phase 4 provisions the reserved consumer rows through the classic CLI owner.
+    This class cannot acquire, renew, or accept a caller-supplied fence. All writes
+    lock profile before board.
     """
 
     def __init__(self, board, state, return_route_id: str):

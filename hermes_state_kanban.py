@@ -8,6 +8,7 @@ import uuid
 from hermes_cli.sqlite_migration_backup import migration_backup
 
 KANBAN_ROUTE_SCHEMA_VERSION = 1
+KANBAN_CONSUMER_LEASE_SECONDS = 30
 KANBAN_ROUTE_SCHEMA_SQL = """
 BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS kanban_route_schema (
@@ -74,6 +75,13 @@ def assert_trusted_route_writer() -> None:
 
     if is_delegated_child_process_context() or explicit_board_intent_is_pinned():
         raise PermissionError("workers cannot create or set return routes")
+
+
+def process_identity() -> tuple[int, int]:
+    """Resolve the live process incarnation at the authority boundary."""
+    from hermes_cli.completion_inbox import process_identity as _process_identity
+
+    return _process_identity()
 
 
 class SessionKanbanRoutesMixin:
@@ -151,3 +159,134 @@ class SessionKanbanRoutesMixin:
         if row is None:
             return None
         return dict(row)
+
+    @staticmethod
+    def _consumer_ttl(ttl_seconds: int) -> int:
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise ValueError("consumer lease duration must be an integer")
+        if ttl_seconds < 5 or ttl_seconds > 300:
+            raise ValueError("consumer lease duration must be between 5 and 300 seconds")
+        return ttl_seconds
+
+    def acquire_kanban_cli_consumer(
+        self,
+        session_id: str,
+        lease_owner: str,
+        *,
+        ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
+    ) -> dict:
+        """Acquire or reacquire the classic CLI consumer with a monotonic fence.
+
+        The active-session registry proves that ``lease_owner`` is the one live
+        foreground owner before it calls this method. Process identity and the
+        persisted CLI session incarnation are derived here, not accepted from a
+        caller. Reacquiring an expired lease always advances the fence.
+        """
+        assert_trusted_route_writer()
+        if not isinstance(lease_owner, str) or not lease_owner.strip():
+            raise ValueError("consumer lease owner is required")
+        ttl = self._consumer_ttl(ttl_seconds)
+        pid, started = process_identity()
+        now = int(time.time())
+
+        def acquire(conn):
+            session = conn.execute(
+                "SELECT source,started_at FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+            if session is None:
+                raise ValueError("consumer requires a persisted current session")
+            if str(session["source"] or "").lower() != "cli":
+                raise ValueError("consumer session is not an interactive CLI session")
+            current = conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
+            ).fetchone()
+            same_live_owner = bool(
+                current is not None
+                and current["lease_owner"] == lease_owner
+                and current["owner_pid"] == pid
+                and current["owner_started_at"] == started
+                and current["session_started_at"] == session["started_at"]
+                and (current["lease_expires_at"] or 0) > now
+            )
+            fence = int(current["consumer_fence"] or 0) if same_live_owner else (
+                int(current["consumer_fence"] or 0) + 1 if current is not None else 1
+            )
+            expires = now + ttl
+            conn.execute(
+                "INSERT INTO kanban_session_consumers "
+                "(session_id,consumer_fence,lease_owner,lease_expires_at,owner_pid,"
+                "owner_started_at,session_started_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "consumer_fence=excluded.consumer_fence,lease_owner=excluded.lease_owner,"
+                "lease_expires_at=excluded.lease_expires_at,owner_pid=excluded.owner_pid,"
+                "owner_started_at=excluded.owner_started_at,session_started_at=excluded.session_started_at",
+                (session_id, fence, lease_owner, expires, pid, started, session["started_at"]),
+            )
+            return dict(conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
+            ).fetchone())
+
+        return self._execute_write(acquire)
+
+    def renew_kanban_cli_consumer(
+        self,
+        session_id: str,
+        lease_owner: str,
+        consumer_fence: int,
+        *,
+        ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
+    ) -> dict | None:
+        """Renew only the exact, unexpired process/session incarnation."""
+        assert_trusted_route_writer()
+        ttl = self._consumer_ttl(ttl_seconds)
+        pid, started = process_identity()
+        now = int(time.time())
+
+        def renew(conn):
+            session = conn.execute(
+                "SELECT started_at FROM sessions WHERE id=? AND source='cli'", (session_id,)
+            ).fetchone()
+            if session is None:
+                return None
+            cursor = conn.execute(
+                "UPDATE kanban_session_consumers SET lease_expires_at=? "
+                "WHERE session_id=? AND consumer_fence=? AND lease_owner=? "
+                "AND owner_pid=? AND owner_started_at=? AND session_started_at=? "
+                "AND lease_expires_at>?",
+                (
+                    now + ttl,
+                    session_id,
+                    consumer_fence,
+                    lease_owner,
+                    pid,
+                    started,
+                    session["started_at"],
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return dict(conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
+            ).fetchone())
+
+        return self._execute_write(renew)
+
+    def release_kanban_cli_consumer(
+        self, session_id: str, lease_owner: str, consumer_fence: int
+    ) -> bool:
+        """Release only the exact live process incarnation, retaining its fence."""
+        assert_trusted_route_writer()
+        pid, started = process_identity()
+
+        def release(conn):
+            cursor = conn.execute(
+                "UPDATE kanban_session_consumers SET lease_owner=NULL,lease_expires_at=NULL,"
+                "owner_pid=NULL,owner_started_at=NULL "
+                "WHERE session_id=? AND consumer_fence=? AND lease_owner=? "
+                "AND owner_pid=? AND owner_started_at=?",
+                (session_id, consumer_fence, lease_owner, pid, started),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(release))

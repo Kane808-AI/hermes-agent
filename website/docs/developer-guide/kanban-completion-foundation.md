@@ -67,9 +67,10 @@ identity. A different controller cannot change any board control state. Workers,
 children, and descendant processes cannot use even an inherited trusted scope. Export/import
 scrub controller ownership along with routes. The owning controller can disable a board
 whose capture trigger has been lost, but enabling it still requires complete capture.
-`cli_enabled`, `gateway_enabled`, `tui_enabled`, and `repair_enabled` are reserved and refused
-in this slice. No new consumer, gateway fallback, external request, JEV package, or replay
-path is installed or enabled.
+`cli_enabled` remains false by default and enables only the fenced classic interactive CLI
+consumer added in Phase 4. `gateway_enabled`, `tui_enabled`, and `repair_enabled` remain
+reserved and refused. No gateway fallback, external request, JEV package, or replay path is
+installed or enabled.
 
 Capture is forward-only. Enabling it does not generate rows for old events. An actionable
 event without a route remains visible in `producer_diagnostics`; it cannot silently pass

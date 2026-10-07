@@ -408,11 +408,54 @@ class ActiveSessionLease:
     state_path: Optional[Path] = None
     lock_path: Optional[Path] = None
     track_liveness: bool = False
+    consumer_state: Any = None
+    consumer_fence: Optional[int] = None
+    consumer_expires_at: Optional[int] = None
 
     def release(self) -> None:
         if self.released or not self.enabled:
             return
         release_active_session(self)
+
+    def activate_completion_consumer(self, state, config: Any) -> bool:
+        """Attach Phase 4 authority only to an owned classic CLI lease."""
+        if self.released or not self.enabled or self.surface != "cli":
+            return False
+        from hermes_cli.kanban_delivery import DeliveryPolicy
+
+        policy = DeliveryPolicy.from_config(config)
+        policy.assert_supported()
+        if not policy.cli_enabled:
+            return False
+        state_path, lock_path = _lease_paths(self)
+        expected_home = state_path.parent.parent.resolve()
+        if Path(state.db_path).resolve().parent != expected_home:
+            raise PermissionError("consumer state store does not match the active CLI profile")
+        with _FileLock(lock_path):
+            _require_owned_registry_entry(self, state_path)
+            authority = state.acquire_kanban_cli_consumer(self.session_id, self.lease_id)
+        self.consumer_state = state
+        self.consumer_fence = int(authority["consumer_fence"])
+        self.consumer_expires_at = int(authority["lease_expires_at"])
+        return True
+
+    def heartbeat_completion_consumer(self) -> bool:
+        """Renew the exact authority, or reacquire with a new fence after expiry."""
+        if self.released or self.consumer_state is None or self.consumer_fence is None:
+            return False
+        state_path, lock_path = _lease_paths(self)
+        with _FileLock(lock_path):
+            _require_owned_registry_entry(self, state_path)
+            authority = self.consumer_state.renew_kanban_cli_consumer(
+                self.session_id, self.lease_id, self.consumer_fence
+            )
+            if authority is None:
+                authority = self.consumer_state.acquire_kanban_cli_consumer(
+                    self.session_id, self.lease_id
+                )
+        self.consumer_fence = int(authority["consumer_fence"])
+        self.consumer_expires_at = int(authority["lease_expires_at"])
+        return True
 
 
 def _clean_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -427,6 +470,37 @@ def _drop_lease(
     if len(kept) != len(entries):
         _write_entries(state_path, kept)
     return kept
+
+
+def _require_owned_registry_entry(
+    lease: ActiveSessionLease, state_path: Path
+) -> dict[str, Any]:
+    """Return the exact live registry row or fail closed."""
+    loaded = _read_live_entries(
+        state_path,
+        track_liveness=True,
+        warn="",
+        target_session_id=lease.session_id,
+    )
+    if loaded is None:
+        raise ActiveSessionRegistryError("active session registry is unavailable")
+    own = next(
+        (
+            entry
+            for entry in loaded[1]
+            if str(entry.get("lease_id") or "") == lease.lease_id
+        ),
+        None,
+    )
+    if (
+        own is None
+        or str(own.get("session_id") or "") != lease.session_id
+        or str(own.get("surface") or "") != "cli"
+        or _registry_pid(own.get("pid")) != os.getpid()
+        or not _pid_liveness(own.get("pid"), own.get("process_start_time"))
+    ):
+        raise PermissionError("classic CLI no longer owns the active session")
+    return own
 
 
 def _holds_session(entries: list[dict[str, Any]], session_id: str) -> bool:
@@ -582,6 +656,23 @@ def release_active_session(lease: ActiveSessionLease) -> None:
     with _FileLock(lock_path):
         if lease.released:
             return
+        if lease.consumer_state is not None and lease.consumer_fence is not None:
+            try:
+                _require_owned_registry_entry(lease, state_path)
+                lease.consumer_state.release_kanban_cli_consumer(
+                    lease.session_id, lease.lease_id, lease.consumer_fence
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to release durable completion consumer for session %s; "
+                    "the short lease will expire",
+                    lease.session_id,
+                    exc_info=True,
+                )
+            finally:
+                lease.consumer_state = None
+                lease.consumer_fence = None
+                lease.consumer_expires_at = None
         loaded = _read_live_entries(
             state_path, track_liveness=lease.track_liveness,
             warn="Active-session registry is unavailable; preserving it while "
@@ -621,10 +712,44 @@ def transfer_active_session(
         entries = loaded[1]
         own = next((e for e in entries if str(e.get("lease_id") or "") == lease.lease_id), None)
         if own is not None:
+            new_authority = None
+            old_session_id = lease.session_id
+            old_fence = lease.consumer_fence
+            if lease.consumer_state is not None and old_fence is not None:
+                try:
+                    new_authority = lease.consumer_state.acquire_kanban_cli_consumer(
+                        new_session_id, lease.lease_id
+                    )
+                except Exception:
+                    logger.warning(
+                        "Refused completion consumer transfer from %s to %s",
+                        old_session_id,
+                        new_session_id,
+                        exc_info=True,
+                    )
+                    return False
             own["session_id"] = new_session_id
             own["updated_at"] = time.time()
             if metadata:
                 own["metadata"] = _clean_metadata(metadata)
+            try:
+                _write_entries(state_path, entries)
+            except BaseException:
+                if new_authority is not None:
+                    with suppress(Exception):
+                        lease.consumer_state.release_kanban_cli_consumer(
+                            new_session_id,
+                            lease.lease_id,
+                            int(new_authority["consumer_fence"]),
+                        )
+                raise
+            if new_authority is not None:
+                with suppress(Exception):
+                    lease.consumer_state.release_kanban_cli_consumer(
+                        old_session_id, lease.lease_id, old_fence
+                    )
+                lease.consumer_fence = int(new_authority["consumer_fence"])
+                lease.consumer_expires_at = int(new_authority["lease_expires_at"])
         elif lease.track_liveness:
             entries.append(_lease_entry(
                 lease_id=lease.lease_id, session_id=new_session_id, surface=lease.surface,
@@ -632,7 +757,8 @@ def transfer_active_session(
             ))
         else:
             return False
-        _write_entries(state_path, entries)
+        if own is None:
+            _write_entries(state_path, entries)
         lease.session_id = new_session_id
         return True
 

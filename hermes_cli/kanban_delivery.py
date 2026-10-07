@@ -1,7 +1,4 @@
-"""Phase 1 producer controls, trusted origin binding, and read-only rollout diagnostics.
-
-Consumers, transcript saga, wakes, and replay intentionally have no implementation here.
-"""
+"""Producer controls, trusted origin binding, and phased consumer rollout policy."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -65,8 +62,8 @@ class DeliveryPolicy:
         return cls(**values, acknowledged_retention_days=retention)
 
     def assert_supported(self):
-        if self.cli_enabled or self.gateway_enabled or self.tui_enabled or self.repair_enabled:
-            raise RuntimeError("completion consumers and repair require a later phase")
+        if self.gateway_enabled or self.tui_enabled or self.repair_enabled:
+            raise RuntimeError("non-CLI completion consumers and repair require a later phase")
 
 
 def board_uuid(conn: sqlite3.Connection) -> str:
