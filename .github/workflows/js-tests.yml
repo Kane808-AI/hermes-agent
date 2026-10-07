@@ -4,6 +4,9 @@ name: JS Tests
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: JS & TS checks
@@ -14,10 +17,15 @@ jobs:
     #
     # One larger runner installs one time. vitest, tsc and eslint each size
     # their own worker pool from the core count.
-    runs-on: ubuntu-latest-32-core
-    timeout-minutes: 30
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      # Leave RAM for native Electron/Python children beside the JS heap.
+      NODE_OPTIONS: ${{ github.repository != 'NousResearch/hermes-agent' && '--max-old-space-size=4096' || '' }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up the locked JS build toolchain
         id: node
         uses: ./.github/actions/setup-pm
@@ -69,7 +77,7 @@ jobs:
         with:
           command: npm ci
 
-      # Every check runs at the same time. The step fails only after all of
+      # Checks run with bounded concurrency. The step fails only after all of
       # them finish. There are two reasons this is not ``npm run --ws check``.
       #
       #   * ``--ws`` is serial and stops at the first workspace that fails. A
@@ -87,4 +95,7 @@ jobs:
       # not an empty run, because an empty run reports green after it checks
       # nothing.
       - name: Run all workspace checks
-        run: node .github/scripts/run-workspace-checks.mjs
+        # Keep each check's inner pool, but do not overlap those pools on forks.
+        run: node .github/scripts/run-workspace-checks.mjs --concurrency "$CHECK_CONCURRENCY"
+        env:
+          CHECK_CONCURRENCY: ${{ github.repository == 'NousResearch/hermes-agent' && '32' || '1' }}
