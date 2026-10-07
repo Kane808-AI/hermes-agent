@@ -116,7 +116,7 @@ def test_future_profile_route_schema_refuses_writable_open(tmp_path):
 
 
 def test_export_scrubs_routes_without_touching_live_source(tmp_path, monkeypatch):
-    from hermes_cli.kanban_delivery import board_uuid, configure_producer, trusted_return_route
+    from hermes_cli.kanban_delivery import board_uuid, configure_producer, trusted_return_route, trusted_board_controller
     from hermes_cli.kanban_transfer import export_board, import_board
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -129,15 +129,58 @@ def test_export_scrubs_routes_without_touching_live_source(tmp_path, monkeypatch
         route = state.create_kanban_return_route(identity, "s", surface="cli", interactive=True)
         with trusted_return_route(state, conn, route):
             tid = kb.create_task(conn, title="routed source")
-        configure_producer(conn, {"kanban": {"completion_inbox": {"producer_enabled": True}}})
+        with trusted_board_controller(state):
+            configure_producer(conn, {"kanban": {"completion_inbox": {"producer_enabled": True}}})
+        controller = conn.execute("SELECT controller_id FROM kanban_delivery_control").fetchone()[0]
         kb.complete_task(conn, tid, summary="pending delivery")
     archive = export_board("source", str(tmp_path / "export.tar.gz"))
     imported = import_board(archive["archive"], slug="destination")
     with kbc.connect_closing(board="source") as conn:
         assert board_uuid(conn) == identity
         assert conn.execute("SELECT COUNT(*) FROM kanban_deliveries").fetchone()[0] == 1
+        assert conn.execute("SELECT controller_id FROM kanban_delivery_control").fetchone()[0] == controller
     with kbc.connect_closing(board=imported["board"]) as conn:
         assert board_uuid(conn) != identity
         assert kb.get_task(conn, tid).return_route_id is None
         assert not conn.execute("SELECT 1 FROM kanban_deliveries").fetchone()
         assert conn.execute("SELECT producer_enabled FROM kanban_delivery_control").fetchone()[0] == 0
+        assert conn.execute("SELECT controller_id FROM kanban_delivery_control").fetchone()[0] is None
+
+
+def test_reviewed_v1_upgrade_preserves_identity_and_obligations_but_requires_controller(tmp_path):
+    from hermes_cli.kanban_delivery import board_uuid, configure_producer, trusted_board_controller, trusted_return_route
+
+    path = tmp_path / "reviewed.db"
+    with kbc.connect_closing(path) as conn, contextlib.closing(SessionDB(tmp_path / "state.db")) as state:
+        identity = board_uuid(conn)
+        state.create_session("s", source="cli")
+        route = state.create_kanban_return_route(identity, "s", surface="cli", interactive=True)
+        with trusted_return_route(state, conn, route):
+            tid = kb.create_task(conn, title="pending from reviewed foundation")
+        with trusted_board_controller(state):
+            configure_producer(conn, {"kanban": {"completion_inbox": {"producer_enabled": True}}})
+        kb.complete_task(conn, tid, summary="pending")
+        obligation = dict(conn.execute("SELECT * FROM kanban_deliveries").fetchone())
+        # Reproduce the reviewed extension's metadata and unconditional route guard.
+        conn.execute("DROP TRIGGER kanban_controller_immutable")
+        conn.execute("ALTER TABLE kanban_delivery_control DROP COLUMN controller_id")
+        conn.execute("UPDATE kanban_delivery_control SET schema_version=1,min_writer_version=1")
+        conn.execute("DROP TRIGGER kanban_task_route_immutable")
+        conn.execute("CREATE TRIGGER kanban_task_route_immutable BEFORE UPDATE OF return_route_id,origin_interactive "
+                     "ON tasks WHEN OLD.return_route_id IS NOT NEW.return_route_id "
+                     "OR OLD.origin_interactive IS NOT NEW.origin_interactive "
+                     "BEGIN SELECT RAISE(ABORT, 'return route is immutable'); END")
+        conn.execute("DROP TRIGGER kanban_capture_delivery")
+        capture = schema.DELIVERY_TRIGGERS.split("CREATE TRIGGER IF NOT EXISTS kanban_task_route_immutable")[0]
+        conn.execute(capture.replace(f"!={schema.DELIVERY_SCHEMA_VERSION}", "!=1"))
+    kb._INITIALIZED_PATHS.discard(str(path.resolve()))
+    with kbc.connect_closing(path) as conn:
+        assert board_uuid(conn) == identity
+        assert dict(conn.execute("SELECT * FROM kanban_deliveries").fetchone()) == obligation
+        assert conn.execute("SELECT producer_enabled,controller_id FROM kanban_delivery_control").fetchone()[:] == (0, None)
+        assert schema.check_delivery_schema(conn, require_capture=True)
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute("UPDATE tasks SET return_route_id=NULL WHERE id=?", (tid,))
+    backup = path.with_name("reviewed.db.before-kanban-delivery-v2.bak")
+    with contextlib.closing(sqlite3.connect(backup)) as snapshot:
+        assert snapshot.execute("SELECT schema_version,producer_enabled FROM kanban_delivery_control").fetchone() == (1, 1)

@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS kanban_route_schema (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     version INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS kanban_board_controller (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    controller_id TEXT NOT NULL UNIQUE,
+    owner_state_path TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kanban_return_routes (
     return_route_id TEXT PRIMARY KEY,
     board_uuid TEXT NOT NULL,
@@ -49,13 +54,30 @@ def prepare_route_migration(conn, path) -> None:
 
 
 def assert_trusted_route_writer() -> None:
-    from agent.delegation_context import is_delegated_child_process_context, owned_kanban_task
+    from agent.delegation_context import is_delegated_child_process_context, explicit_board_intent_is_pinned
 
-    if is_delegated_child_process_context() or owned_kanban_task():
+    if is_delegated_child_process_context() or explicit_board_intent_is_pinned():
         raise PermissionError("workers cannot create or set return routes")
 
 
 class SessionKanbanRoutesMixin:
+    def _kanban_controller_id(self) -> str:
+        """Trusted orchestration derives identity from its explicit profile store, never env/args."""
+        assert_trusted_route_writer()
+        owner = str(self.db_path.resolve())
+        def identify(conn):
+            row = conn.execute("SELECT controller_id,owner_state_path FROM kanban_board_controller "
+                               "WHERE singleton=1").fetchone()
+            if row is not None and row[1] == owner:
+                return row[0]
+            # A copied or relocated profile cannot impersonate the original board controller.
+            identity = uuid.uuid4().hex
+            conn.execute("INSERT INTO kanban_board_controller VALUES (1,?,?) "
+                         "ON CONFLICT(singleton) DO UPDATE SET controller_id=excluded.controller_id,"
+                         "owner_state_path=excluded.owner_state_path", (identity, owner))
+            return identity
+        return self._execute_write(identify)
+
     def create_kanban_return_route(
         self, board_uuid: str, session_id: str, *, surface: str, interactive: bool,
     ) -> str:

@@ -15,7 +15,10 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    with kbc.connect_closing(tmp_path / "board.db") as conn:
+    from hermes_cli.kanban_delivery import trusted_board_controller
+    with kbc.connect_closing(tmp_path / "board.db") as conn, \
+            contextlib.closing(SessionDB(tmp_path / "controller.db")) as state, \
+            trusted_board_controller(state):
         yield conn
 
 
@@ -211,7 +214,11 @@ def test_native_writer_missing_delivery_stays_visible_after_trigger_is_restored(
     tid, _ = routed_task(board, tmp_path)
     enable(board)
     board.execute("DROP TRIGGER kanban_capture_delivery")
-    kb._append_event(board, tid, "completed")
+    with pytest.raises(RuntimeError, match="delivery schema"):
+        kb._append_event(board, tid, "completed")
+    # Older/direct writers can still leave a violation for read-only diagnostics.
+    board.execute("INSERT INTO task_events(task_id,kind,created_at,producer_version,delivery_expected) "
+                  "VALUES (?,'completed',1,?,1)", (tid, 2))
     execute_ddl(board, DELIVERY_TRIGGERS)
     assert producer_diagnostics(board)["missing_deliveries"] == 1
     with pytest.raises(RuntimeError, match="missing_deliveries"):

@@ -43,12 +43,28 @@ routes. Tool arguments cannot supply `return_route_id` or `origin_interactive`.
 children inherit the immutable route. Ambiguous multiple origins are rejected.
 A deleted/recreated session or copied profile database cannot resolve the original route.
 
+An existing task can receive its first route through the explicit native
+`bind_task_return_route(conn, task_id)` operation inside `trusted_return_route(state, conn, route_id)`.
+The operation accepts no route argument. It revalidates the board and owning profile state
+under `BEGIN IMMEDIATE`, rejects a bound/conflicting origin or any prior actionable delivery
+obligation, and checks both dependency and creator origins. A connection-local capability
+permits exactly the matching NULL-to-route update. The protection trigger stays installed
+throughout binding and closes again on success or failure. Subsequent actionable events
+use normal atomic capture. No old event is replayed.
+
 Runtime surface capture is Phase 3. The Phase 1 API is exercised only by explicit trusted
 callers and tests. It does not infer eligibility from environment session strings.
 
 All `kanban.completion_inbox` flags default to false. Merely opening a board never enables
-its producer. Its owner explicitly calls `configure_producer` with the profile's effective
-config. This avoids competing workers or profiles changing a shared board's capture policy.
+its producer. Native orchestration explicitly enters `trusted_board_controller(state)` and
+calls `configure_producer` with the profile's effective config. The first authorized enable
+or disable claims an unowned board. The board stores only an opaque controller UUID. Its
+profile-local identity comes from the explicit state database, never tool arguments or
+environment claims. Reopens preserve it. Copied/relocated profile stores receive a new
+identity. A different controller cannot change any board control state. Workers, delegated
+children, and descendant processes cannot use even an inherited trusted scope. Export/import
+scrub controller ownership along with routes. The owning controller can disable a board
+whose capture trigger has been lost, but enabling it still requires complete capture.
 `cli_enabled`, `gateway_enabled`, `tui_enabled`, and `repair_enabled` are reserved and refused
 in this slice. No new consumer, gateway fallback, external request, JEV package, or replay
 path is installed or enabled.
@@ -59,13 +75,28 @@ the rollout gate. Raw old writers have `producer_version=0`. The scanner reports
 missing deliveries, missing routes, and a missing capture trigger. `require_producer_ready`
 refuses rollout on any violation. It performs no repairs or writes.
 
+Before enabling capture or inserting a native actionable event, readiness checks verify
+the required tables, columns, identity/control rows, protection triggers, and capture-trigger
+definition. Actionable writes check under the SQLite writer lock, including standalone
+native event inserts. An incomplete capture installation rolls back the task transition and
+event together. Cached opens refuse enabled incomplete schemas. Migration discovery still
+recognizes a genuinely legacy board as not yet migrated.
+
 ## Migration and rollback
 
 Board and profile-route extensions have independent version markers. Unknown schema or
 minimum-writer versions are refused before migration, including cached board opens.
 Existing files receive private SQLite online-backup snapshots that include committed WAL
 frames, named `*.before-kanban-delivery-v1.bak` and `*.before-kanban-routes-v1.bak`.
-Backup failure prevents migration. Snapshots are never overwritten.
+The review follow-up uses board schema/writer version 2. Upgrading the reviewed v1 extension
+also creates `*.before-kanban-delivery-v2.bak`, preserves board identity and obligations, and
+disables capture until a trusted controller explicitly claims it. The v1 protection triggers
+are replaced only inside this schema-upgrade transaction, without a task mutation.
+Backup publication fsyncs the containing directory after the create-once hard link, including
+a retry that finds an existing final name. Windows cannot open directories through `os.open`.
+An explicitly unsupported directory fsync on other filesystems warns and retains the private,
+file-synced snapshot with weaker power-loss publication durability. Other I/O errors prevent
+migration, including on retry. Snapshots are never overwritten.
 
 New board columns, outbox tables, identity, capture triggers, and version marker commit
 under one `BEGIN IMMEDIATE`. Profile route tables and the reserved consumer-lease table
@@ -75,8 +106,9 @@ Existing subscription cursors and historical events are not replayed or repurpos
 Rollback calls `configure_producer` with the producer disabled and leaves the additive
 schema and all deliveries intact. There is no down migration. Unprocessed and dead-letter
 rows cannot be removed by retry count or age. Linked events/tasks cannot be deleted while
-deliveries remain, even by a connection with foreign keys disabled. Event GC skips those
-events. Explicit acknowledged-row GC uses `acknowledged_retention_days` (30 by default,
+deliveries remain, even by a connection with foreign keys disabled. Event GC also preserves
+unrouted events marked `delivery_expected=1`, so GC cannot make a previously obligated task
+eligible for late binding. Explicit acknowledged-row GC uses `acknowledged_retention_days` (30 by default,
 0 disables GC), removing only acknowledged rows and their now-unreferenced events.
 
 ## Phase 0 regression locks and Phase 2 boundary
@@ -103,7 +135,8 @@ Verified on 2026-10-06 on macOS arm64 with Python 3.14.7, using a disposable
 PM-built test environment and isolated Hermes homes. Base and remote `main` were
 `f7e12a645492578ada323678950f9bf8f0c6c030`. The main checkout remained unchanged.
 
-The final relevant run covered 26 files: **283 passed, 17 pre-existing failures,
+The original reviewed commit was `6f074bd903a2e8910cd1181726f4ecd9ace84d29`.
+Its relevant run covered 26 files: **283 passed, 17 pre-existing failures,
 1 Windows-only skip, and 10 strict expected failures for later phases**. All 57
 newly passing foundation contracts passed. The 30-test legacy notification baseline
 also remains green. `scripts/check` passed all 11 checks with no code-health blockers
@@ -142,6 +175,43 @@ scripts/run_tests.sh \
   -q --tb=short --file-retries 0 -j 4
 ```
 
+### Phase 0/1 review follow-up
+
+Follow-up revision: the commit containing this receipt, directly after the reviewed commit.
+Resolve its exact hash with
+`git log -1 --format=%H -- website/docs/developer-guide/kanban-completion-foundation.md`.
+The follow-up remains on `feat/completion-inbox-phase01`.
+
+The six foundation files passed **85 tests with no failures**. This run includes the original
+delivery, migration, configuration, and profile-route files plus
+`tests/hermes_cli/test_kanban_delivery_review.py` and
+`tests/hermes_cli/test_sqlite_migration_backup.py`. Coverage includes incomplete capture,
+cached opens, rollback, independent and competing controllers, copied profile identity,
+export/import scrubbing, one-time binding, inherited worker/delegate denial, conflicting
+origins, obligation retention, v1 upgrade, and backup publication/fallback behavior.
+The initial review regressions failed on the reviewed implementation. Six capture regression
+cases were also reproduced separately using its existing configuration API.
+
+The exact 26-file command above passed **284 tests**, with **17 pre-existing failures,
+1 Windows-only skip, and 10 strict expected failures**. An unchanged detached checkout of
+the reviewed commit under the same `.hermes/hermes-agent/.worktrees/` layout reproduced
+**283 passes and the identical 17 failing test IDs** with the same interpreter and runner.
+A temporary checkout outside the Hermes home avoided the 16 home-I/O guard failures, confirming their path
+dependence. No new failure was introduced or hidden.
+
+One intervening broad run had **283 passes and 18 failures** because
+`test_concurrent_initializers_keep_one_board_identity` also hit an intermittent existing
+WAL-preflight race. A real SQLite connection closing between the sidecar's `is_file` and
+`os.access` checks reproduced the same false read-only refusal on unchanged reviewed code.
+Twenty uninstrumented baseline concurrency probes passed, so the failure is intermittent.
+The final unchanged repeat returned to the 17 baseline failures above. This pre-existing
+race remains a verification limitation and was not modified in this scoped follow-up.
+
+`scripts/check` passed all **11 checks**, with **0 code-health blockers and 0 advisories**.
+`git diff --check` passed. All database verification used temporary stores. No live database
+migration, service restart, production configuration change, or Phase 2 implementation occurred.
+The follow-up commit contains only the intended fixes, tests, and this receipt.
+
 The failing cases were reproduced on unchanged `main` with the same interpreter and
 canonical runner. They were not modified or hidden:
 
@@ -152,7 +222,8 @@ canonical runner. They were not modified or hidden:
 | `tests/hermes_cli/test_kanban_db.py` | 1 | `test_infrastructure_spawn_refusal_never_charges_the_card` expects an empty `auto_blocked` list but receives the task ID. |
 
 These pre-existing failures remain a verification limitation for subsequent work.
-No access blocker for Phase 2 was found. Consumer activation remains blocked by the
+The four Phase 0/1 review blockers are resolved. Phase 2 implementation is unblocked.
+Consumer activation remains blocked by the
 unimplemented linked-receipt saga, fencing, reconciliation, and side-effect guards.
 Phase 2 was not started. No JEV, hosted egress, gateway fallback, historical replay,
 or production-configuration change was introduced.

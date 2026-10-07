@@ -8,8 +8,8 @@ import uuid
 
 from hermes_cli.sqlite_migration_backup import execute_ddl, migration_backup
 
-DELIVERY_SCHEMA_VERSION = 1
-DELIVERY_WRITER_VERSION = 1
+DELIVERY_SCHEMA_VERSION = 2
+DELIVERY_WRITER_VERSION = 2
 ACTIONABLE_EVENT_KINDS = ("completed", "blocked", "gave_up", "review_requested", "changes_requested")
 
 DELIVERY_DDL = """
@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS kanban_delivery_control (
     schema_version INTEGER NOT NULL,
     min_writer_version INTEGER NOT NULL,
     producer_enabled INTEGER NOT NULL DEFAULT 0 CHECK(producer_enabled IN (0,1)),
-    first_event_id INTEGER NOT NULL DEFAULT 0
+    first_event_id INTEGER NOT NULL DEFAULT 0,
+    controller_id TEXT
 );
 CREATE TABLE IF NOT EXISTS kanban_deliveries (
     id TEXT PRIMARY KEY,
@@ -60,7 +61,7 @@ CREATE TRIGGER IF NOT EXISTS kanban_capture_delivery AFTER INSERT ON task_events
 WHEN NEW.kind IN ({_ACTIONABLE_SQL})
  AND (SELECT producer_enabled FROM kanban_delivery_control WHERE singleton=1)=1
 BEGIN
-    SELECT CASE WHEN (SELECT schema_version FROM kanban_delivery_control WHERE singleton=1)!=1
+    SELECT CASE WHEN (SELECT schema_version FROM kanban_delivery_control WHERE singleton=1)!={DELIVERY_SCHEMA_VERSION}
         THEN RAISE(ABORT, 'incompatible delivery schema') END;
     UPDATE task_events SET delivery_expected=1 WHERE id=NEW.id;
     INSERT INTO kanban_deliveries(id,board_uuid,task_id,event_id,return_route_id,created_at)
@@ -70,8 +71,15 @@ BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS kanban_task_route_immutable
 BEFORE UPDATE OF return_route_id, origin_interactive ON tasks
-WHEN OLD.return_route_id IS NOT NEW.return_route_id OR OLD.origin_interactive IS NOT NEW.origin_interactive
+WHEN (OLD.return_route_id IS NOT NEW.return_route_id OR OLD.origin_interactive IS NOT NEW.origin_interactive)
+ AND NOT (OLD.return_route_id IS NULL AND OLD.origin_interactive=0
+          AND NEW.return_route_id IS NOT NULL AND NEW.origin_interactive=1
+          AND kanban_route_binding_authorized(NEW.id,NEW.return_route_id)=1
+          AND NOT EXISTS (SELECT 1 FROM task_events WHERE task_id=OLD.id AND delivery_expected=1))
 BEGIN SELECT RAISE(ABORT, 'return route is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS kanban_controller_immutable BEFORE UPDATE OF controller_id ON kanban_delivery_control
+WHEN OLD.controller_id IS NOT NULL AND OLD.controller_id IS NOT NEW.controller_id
+BEGIN SELECT RAISE(ABORT, 'board controller is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS kanban_delivery_identity_immutable
 BEFORE UPDATE OF id,board_uuid,task_id,event_id,return_route_id,created_at ON kanban_deliveries
 WHEN OLD.id IS NOT NEW.id OR OLD.board_uuid IS NOT NEW.board_uuid OR OLD.task_id IS NOT NEW.task_id
@@ -101,32 +109,124 @@ DELIVERY_TRIGGER_NAMES = (
     "kanban_capture_delivery", "kanban_task_route_immutable", "kanban_delivery_identity_immutable",
     "kanban_delivery_preserve_unprocessed", "kanban_event_identity_immutable", "kanban_board_identity_immutable",
     "kanban_board_identity_preserve", "kanban_event_preserve_delivery", "kanban_task_preserve_delivery",
+    "kanban_controller_immutable",
 )
 
 
-def check_delivery_schema(conn: sqlite3.Connection) -> bool:
-    """Fail before schema writes on an unknown newer extension, including cached opens."""
-    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_delivery_control'").fetchone():
-        return False
-    row = conn.execute("SELECT schema_version,min_writer_version FROM kanban_delivery_control").fetchone()
-    if row is None or row[0] != DELIVERY_SCHEMA_VERSION or row[1] > DELIVERY_WRITER_VERSION:
+_CAPTURE_COLUMNS = {
+    "tasks": {"id", "return_route_id", "origin_interactive"},
+    "task_events": {"id", "task_id", "run_id", "kind", "payload", "created_at", "producer_version", "delivery_expected"},
+    "kanban_board_identity": {"singleton", "board_uuid", "created_at"},
+    "kanban_deliveries": {
+        "id", "board_uuid", "task_id", "event_id", "return_route_id", "created_at", "state",
+        "consumer_fence", "marker_message_id", "turn_id", "lease_owner", "lease_expires_at",
+        "attempt_count", "next_attempt_at", "transcript_message_id", "last_error_code",
+        "processed_at", "acknowledged_at",
+    },
+}
+
+
+def delivery_schema_version(conn: sqlite3.Connection) -> int:
+    """Discover a legacy board without permitting a partially installed extension."""
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "kanban_delivery_control" not in names:
+        triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+        if names & {"kanban_deliveries", "kanban_board_identity"} or triggers & set(DELIVERY_TRIGGER_NAMES):
+            raise RuntimeError("incomplete Kanban delivery schema: missing control table")
+        return 0
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(kanban_delivery_control)")}
+    required = {"singleton", "schema_version", "min_writer_version", "producer_enabled", "first_event_id"}
+    if not required <= columns:
+        raise RuntimeError("incomplete Kanban delivery schema: control columns")
+    rows = conn.execute("SELECT singleton,schema_version,min_writer_version FROM kanban_delivery_control").fetchall()
+    if len(rows) != 1 or rows[0][0] != 1 or rows[0][1] not in (1, DELIVERY_SCHEMA_VERSION) \
+            or rows[0][2] > DELIVERY_WRITER_VERSION:
         raise RuntimeError("incompatible Kanban delivery schema or writer version")
+    return rows[0][1]
+
+
+def _validate_capture_schema(conn: sqlite3.Connection, version: int) -> None:
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table, required in _CAPTURE_COLUMNS.items():
+        if table not in tables:
+            raise RuntimeError(f"incomplete Kanban delivery schema: missing table {table}")
+        columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not required <= columns:
+            raise RuntimeError(f"incomplete Kanban delivery schema: {table} columns {sorted(required - columns)}")
+    identities = conn.execute("SELECT singleton,board_uuid FROM kanban_board_identity").fetchall()
+    if len(identities) != 1 or identities[0][0] != 1 or not identities[0][1]:
+        raise RuntimeError("incomplete Kanban delivery schema: board identity")
+    triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    required = set(DELIVERY_TRIGGER_NAMES)
+    if version == 1:
+        required.remove("kanban_controller_immutable")
+    if not required <= triggers:
+        raise RuntimeError(f"incomplete Kanban delivery schema: triggers {sorted(required - triggers)}")
+    if version == DELIVERY_SCHEMA_VERSION:
+        _validate_capture_trigger(conn)
+
+
+def _validate_capture_trigger(conn: sqlite3.Connection) -> None:
+    """The name alone is insufficient if an incomplete installation left a no-op trigger."""
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' "
+                       "AND name='kanban_capture_delivery' AND tbl_name='task_events'").fetchone()
+    expected = DELIVERY_TRIGGERS.split("CREATE TRIGGER IF NOT EXISTS kanban_task_route_immutable")[0]
+    def normalize(value):
+        return " ".join(value.replace("IF NOT EXISTS ", "").strip().rstrip(";").split())
+    if sql is None or normalize(sql[0]) != normalize(expected):
+        raise RuntimeError("incomplete Kanban delivery schema: invalid capture trigger")
+
+
+def check_delivery_schema(conn: sqlite3.Connection, *, require_capture: bool | None = None) -> bool:
+    """Enabled opens and native writes fail closed. Explicit enable validates even when disabled."""
+    version = delivery_schema_version(conn)
+    if version == 0:
+        return False
+    if version != DELIVERY_SCHEMA_VERSION:
+        raise RuntimeError("incompatible Kanban delivery schema or writer version")
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(kanban_delivery_control)")}
+    if "controller_id" not in columns:
+        raise RuntimeError("incomplete Kanban delivery schema: controller column")
+    enabled, controller = conn.execute(
+        "SELECT producer_enabled,controller_id FROM kanban_delivery_control WHERE singleton=1").fetchone()
+    if require_capture is True or (require_capture is None and enabled):
+        _validate_capture_schema(conn, version)
+    if require_capture is None and enabled and not controller:
+        raise RuntimeError("incomplete Kanban delivery schema: missing controller")
     return True
 
 
 def prepare_delivery_migration(conn: sqlite3.Connection, path: Path) -> None:
-    if not check_delivery_schema(conn):
-        migration_backup(conn, path, "kanban-delivery-v1")
+    version = delivery_schema_version(conn)
+    if version == DELIVERY_SCHEMA_VERSION:
+        check_delivery_schema(conn)
+    else:
+        if version == 1:
+            _validate_capture_schema(conn, version)
+        migration_backup(conn, path, f"kanban-delivery-v{DELIVERY_SCHEMA_VERSION if version else 1}")
 
 
 def migrate_delivery_schema(conn: sqlite3.Connection) -> None:
     from hermes_cli.kanban_db import write_txn
     from hermes_cli.sqlite_util import add_column_if_missing
 
-    if check_delivery_schema(conn):
+    if delivery_schema_version(conn) == DELIVERY_SCHEMA_VERSION:
+        check_delivery_schema(conn)
         return
     with write_txn(conn):
-        if check_delivery_schema(conn):
+        version = delivery_schema_version(conn)
+        if version == DELIVERY_SCHEMA_VERSION:
+            check_delivery_schema(conn)
+            return
+        if version == 1:
+            _validate_capture_schema(conn, version)
+            add_column_if_missing(conn, "kanban_delivery_control", "controller_id", "controller_id TEXT")
+            # Schema upgrade only. No task mutation runs while replacing the v1 guards.
+            conn.execute("DROP TRIGGER kanban_task_route_immutable")
+            conn.execute("DROP TRIGGER kanban_capture_delivery")
+            execute_ddl(conn, DELIVERY_TRIGGERS)
+            conn.execute("UPDATE kanban_delivery_control SET schema_version=?,min_writer_version=?,producer_enabled=0",
+                         (DELIVERY_SCHEMA_VERSION, DELIVERY_WRITER_VERSION))
             return
         for table, name, ddl in (
             ("tasks", "return_route_id", "return_route_id TEXT"),
@@ -138,7 +238,8 @@ def migrate_delivery_schema(conn: sqlite3.Connection) -> None:
         execute_ddl(conn, DELIVERY_DDL)
         conn.execute("INSERT INTO kanban_board_identity VALUES (1,?,?)", (uuid.uuid4().hex, int(time.time())))
         execute_ddl(conn, DELIVERY_TRIGGERS)
-        conn.execute("INSERT INTO kanban_delivery_control VALUES (1,?,?,0,0)",
+        conn.execute("INSERT INTO kanban_delivery_control "
+                     "(singleton,schema_version,min_writer_version,producer_enabled,first_event_id) VALUES (1,?,?,0,0)",
                      (DELIVERY_SCHEMA_VERSION, DELIVERY_WRITER_VERSION))
 
 

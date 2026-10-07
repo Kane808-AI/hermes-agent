@@ -14,6 +14,28 @@ import time
 from hermes_cli.kanban_delivery_schema import ACTIONABLE_EVENT_KINDS, DELIVERY_WRITER_VERSION, check_delivery_schema
 
 _RETURN_ROUTE: ContextVar[tuple | None] = ContextVar("kanban_trusted_return_route", default=None)
+_CONTROLLER: ContextVar[tuple | None] = ContextVar("kanban_trusted_board_controller", default=None)
+_ROUTE_BINDING: ContextVar[tuple | None] = ContextVar("kanban_route_binding", default=None)
+
+
+@contextmanager
+def trusted_board_controller(state):
+    """Native orchestration supplies the owning SessionDB, never an ID from tools or env."""
+    from hermes_state_kanban import assert_trusted_route_writer
+
+    assert_trusted_route_writer()
+    identity = state._kanban_controller_id()
+    token = _CONTROLLER.set((state, identity))
+    try:
+        yield
+    finally:
+        _CONTROLLER.reset(token)
+
+
+def install_route_binding_guard(conn: sqlite3.Connection) -> None:
+    """A connection-local, normally closed capability. Protection triggers stay installed."""
+    conn.create_function("kanban_route_binding_authorized", 2,
+                         lambda task, route: int(_ROUTE_BINDING.get() == (conn, task, route)))
 
 
 @dataclass(frozen=True)
@@ -60,13 +82,22 @@ def configure_producer(conn: sqlite3.Connection, config=None) -> DeliveryPolicy:
     assert_trusted_route_writer()
     policy = DeliveryPolicy.from_config(config)
     policy.assert_supported()
-    check_delivery_schema(conn)
+    controller = _CONTROLLER.get()
+    if controller is None:
+        raise PermissionError("producer configuration requires a trusted board controller scope")
+    state, identity = controller
+    if state._kanban_controller_id() != identity:
+        raise PermissionError("board controller identity changed")
     with write_txn(conn):
-        check_delivery_schema(conn)
-        conn.execute("UPDATE kanban_delivery_control SET producer_enabled=?, first_event_id="
+        if not check_delivery_schema(conn, require_capture=policy.producer_enabled):
+            raise RuntimeError("incomplete Kanban delivery schema")
+        owner = conn.execute("SELECT controller_id FROM kanban_delivery_control WHERE singleton=1").fetchone()[0]
+        if owner not in (None, identity):
+            raise PermissionError("board belongs to a different controller")
+        conn.execute("UPDATE kanban_delivery_control SET controller_id=?,producer_enabled=?, first_event_id="
                      "CASE WHEN first_event_id=0 AND ?=1 THEN "
-                     "(SELECT COALESCE(MAX(id),0)+1 FROM task_events) ELSE first_event_id END",
-                     (int(policy.producer_enabled), int(policy.producer_enabled)))
+                     "(SELECT COALESCE(MAX(id),0)+1 FROM task_events) ELSE first_event_id END WHERE singleton=1",
+                     (identity, int(policy.producer_enabled), int(policy.producer_enabled)))
     return policy
 
 
@@ -119,9 +150,55 @@ def task_delivery_origin(conn: sqlite3.Connection, parents, creator_task_id=None
     return route, int(route is not None)
 
 
+def bind_task_return_route(conn: sqlite3.Connection, task_id: str) -> None:
+    """Explicit one-time binding for a legacy task, using only the trusted route scope."""
+    from hermes_cli.kanban_db import parent_ids, write_txn
+    from hermes_state_kanban import assert_trusted_route_writer
+
+    assert_trusted_route_writer()
+    bound = _RETURN_ROUTE.get()
+    if bound is None:
+        raise PermissionError("binding requires a trusted return route scope")
+    state, identity, route = bound
+    with write_txn(conn):
+        if not check_delivery_schema(conn, require_capture=True):
+            raise RuntimeError("incomplete Kanban delivery schema")
+        if identity != board_uuid(conn) or state.resolve_kanban_return_route(route, identity) is None:
+            raise ValueError("return route is not owned by this profile and board")
+        row = conn.execute("SELECT return_route_id,origin_interactive FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError("unknown task")
+        if row[0] is not None or row[1]:
+            raise ValueError("task already has a bound or conflicting origin")
+        if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND delivery_expected=1 LIMIT 1",
+                        (task_id,)).fetchone():
+            raise ValueError("task already emitted an actionable delivery obligation")
+        created = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
+                               "ORDER BY id LIMIT 1", (task_id,)).fetchone()
+        creator = (json.loads(created[0] or "{}").get("creator_task_id") if created else None)
+        task_delivery_origin(conn, parent_ids(conn, task_id), creator)
+        token = _ROUTE_BINDING.set((conn, task_id, route))
+        try:
+            conn.execute("UPDATE tasks SET return_route_id=?,origin_interactive=1 WHERE id=?", (route, task_id))
+        finally:
+            _ROUTE_BINDING.reset(token)
+
+
 def _append_event(conn, task_id, kind, payload=None, *, run_id=None) -> None:
     """SQLite's capture trigger admits the delivery within this exact INSERT transaction."""
-    check_delivery_schema(conn)
+    from hermes_cli.kanban_db import write_txn
+
+    if kind in ACTIONABLE_EVENT_KINDS:
+        # Even a standalone native INSERT checks readiness under the writer lock.
+        with write_txn(conn, allow_nested=True):
+            _insert_event(conn, task_id, kind, payload, run_id=run_id)
+    else:
+        _insert_event(conn, task_id, kind, payload, run_id=run_id)
+
+
+def _insert_event(conn, task_id, kind, payload=None, *, run_id=None) -> None:
+    if not check_delivery_schema(conn, require_capture=True if kind in ACTIONABLE_EVENT_KINDS else None):
+        raise RuntimeError("incomplete Kanban delivery schema")
     expected = "(SELECT producer_enabled FROM kanban_delivery_control WHERE singleton=1)" \
         if kind in ACTIONABLE_EVENT_KINDS else "0"
     conn.execute("INSERT INTO task_events(task_id,run_id,kind,payload,created_at,producer_version,delivery_expected) "
@@ -131,7 +208,8 @@ def _append_event(conn, task_id, kind, payload=None, *, run_id=None) -> None:
 
 
 def producer_diagnostics(conn: sqlite3.Connection) -> dict:
-    check_delivery_schema(conn)
+    # Diagnostics must remain readable when a missing capture trigger blocks writes.
+    check_delivery_schema(conn, require_capture=False)
     placeholders = ",".join("?" for _ in ACTIONABLE_EVENT_KINDS)
     counts = conn.execute(f"""
         SELECT
@@ -155,6 +233,7 @@ def require_producer_ready(conn: sqlite3.Connection) -> None:
     issues = {key: count for key, count in producer_diagnostics(conn).items() if count}
     if issues:
         raise RuntimeError(f"completion inbox rollout blocked: {issues}")
+    check_delivery_schema(conn, require_capture=True)
 
 
 def gc_acknowledged_deliveries(conn: sqlite3.Connection, *, retention_days=None, now=None) -> int:
@@ -184,6 +263,7 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds=30 * 24 * 3600) ->
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute("DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' "
+                           "AND delivery_expected=0 "
                            "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done','archived')) "
                            "AND NOT EXISTS (SELECT 1 FROM kanban_deliveries d WHERE d.event_id=task_events.id)",
                            (cutoff,))

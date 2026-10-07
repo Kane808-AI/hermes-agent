@@ -643,6 +643,8 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
     try:
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
+        from hermes_cli.kanban_delivery import install_route_binding_guard
+        install_route_binding_guard(conn)
         with _INIT_LOCK:
             # WAL doesn't work on network filesystems; the helper falls back to
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
