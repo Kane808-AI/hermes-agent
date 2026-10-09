@@ -230,10 +230,13 @@ class SessionKanbanRoutesMixin:
         return ttl_seconds
 
     @staticmethod
-    def _kanban_cli_compression_lineage_on_conn(conn, session_id: str) -> list[str]:
-        """Return exact canonical CLI ancestors through ``session_id``."""
+    def _kanban_cli_compression_lineage_on_conn(
+        conn, session_id: str, *, surface: str = "cli",
+    ) -> list[str]:
+        """Return exact canonical ancestors for this foreground surface."""
         from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
 
+        allowed_sources = _KANBAN_ROUTE_SOURCES[surface]
         lineage = [session_id]
         seen = {session_id}
         current_id = session_id
@@ -248,7 +251,7 @@ class SessionKanbanRoutesMixin:
                 "SELECT source FROM sessions WHERE id=?", (parent_id,)
             ).fetchone()
             canonical = conn.execute(_CHAIN_STEP_SQL, (parent_id,)).fetchone()
-            if parent is None or str(parent["source"] or "").lower() != "cli" \
+            if parent is None or str(parent["source"] or "").lower() not in allowed_sources \
                     or canonical is None or canonical["id"] != current_id:
                 break
             lineage.append(parent_id)
@@ -262,18 +265,22 @@ class SessionKanbanRoutesMixin:
         session_id: str,
         lease_owner: str,
         *,
+        surface: str = "cli",
         ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
     ) -> dict:
-        """Acquire or reacquire the classic CLI consumer with a monotonic fence.
+        """Acquire or reacquire a foreground consumer with a monotonic fence.
 
         The active-session registry proves that ``lease_owner`` is the one live
         foreground owner before it calls this method. Process identity and the
-        persisted CLI session incarnation are derived here, not accepted from a
+        persisted session incarnation are derived here, not accepted from a
         caller. Reacquiring an expired lease always advances the fence.
         """
         assert_trusted_route_writer()
         if not isinstance(lease_owner, str) or not lease_owner.strip():
             raise ValueError("consumer lease owner is required")
+        allowed_sources = _KANBAN_ROUTE_SOURCES.get(surface)
+        if allowed_sources is None:
+            raise ValueError("consumer requires an interactive foreground surface")
         ttl = self._consumer_ttl(ttl_seconds)
         pid, started = process_identity()
         now = int(time.time())
@@ -284,9 +291,11 @@ class SessionKanbanRoutesMixin:
             ).fetchone()
             if session is None:
                 raise ValueError("consumer requires a persisted current session")
-            if str(session["source"] or "").lower() != "cli":
-                raise ValueError("consumer session is not an interactive CLI session")
-            lineage = self._kanban_cli_compression_lineage_on_conn(conn, session_id)
+            if str(session["source"] or "").lower() not in allowed_sources:
+                raise ValueError(f"consumer session is not an interactive {surface.upper()} session")
+            lineage = self._kanban_cli_compression_lineage_on_conn(
+                conn, session_id, surface=surface
+            )
             placeholders = ",".join("?" for _ in lineage)
             prior = conn.execute(
                 "SELECT MAX(c.consumer_fence) FROM kanban_session_consumers c "
@@ -484,6 +493,7 @@ class SessionKanbanRoutesMixin:
         lease_owner: str,
         consumer_fence: int,
         *,
+        surface: str = "cli",
         ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
     ) -> dict | None:
         """Advance authority across the canonical persisted compression chain only."""
@@ -492,6 +502,9 @@ class SessionKanbanRoutesMixin:
             raise ValueError("consumer lease owner is required")
         if old_session_id == new_session_id:
             raise ValueError("consumer compression transfer requires a new session")
+        allowed_sources = _KANBAN_ROUTE_SOURCES.get(surface)
+        if allowed_sources is None:
+            raise ValueError("consumer requires an interactive foreground surface")
         ttl = self._consumer_ttl(ttl_seconds)
         pid, started = process_identity()
         now = int(time.time())
@@ -519,10 +532,10 @@ class SessionKanbanRoutesMixin:
             ).fetchall()
             by_id = {row["id"]: row for row in sessions}
             if len(by_id) != len(chain) or any(
-                str(by_id[session_id]["source"] or "").lower() != "cli"
+                str(by_id[session_id]["source"] or "").lower() not in allowed_sources
                 for session_id in chain
             ):
-                raise PermissionError("consumer compression lineage is not classic CLI")
+                raise PermissionError("consumer compression lineage changed interactive surface")
             old = conn.execute(
                 "SELECT * FROM kanban_session_consumers WHERE session_id=?",
                 (old_session_id,),
@@ -587,19 +600,23 @@ class SessionKanbanRoutesMixin:
         lease_owner: str,
         consumer_fence: int,
         *,
+        surface: str = "cli",
         ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
     ) -> dict | None:
         """Renew only the exact, unexpired process/session incarnation."""
         assert_trusted_route_writer()
+        allowed_sources = _KANBAN_ROUTE_SOURCES.get(surface)
+        if allowed_sources is None:
+            raise ValueError("consumer requires an interactive foreground surface")
         ttl = self._consumer_ttl(ttl_seconds)
         pid, started = process_identity()
         now = int(time.time())
 
         def renew(conn):
             session = conn.execute(
-                "SELECT started_at FROM sessions WHERE id=? AND source='cli'", (session_id,)
+                "SELECT source,started_at FROM sessions WHERE id=?", (session_id,)
             ).fetchone()
-            if session is None:
+            if session is None or str(session["source"] or "").lower() not in allowed_sources:
                 return None
             cursor = conn.execute(
                 "UPDATE kanban_session_consumers SET lease_expires_at=? "

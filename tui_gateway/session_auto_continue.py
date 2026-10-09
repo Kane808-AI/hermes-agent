@@ -403,7 +403,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
     ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
     after" message must NEVER become a live correction."""
-    mode = "queue" if queued else _load_busy_input_mode()
+    mode = "queue" if queued or session.get("_completion_running") else _load_busy_input_mode()
     agent = session.get("agent")
     # Compression in flight demotes steer/interrupt to queue: a correction delivered
     # mid-compression aborts the compression instead of waiting for it (#61042). The

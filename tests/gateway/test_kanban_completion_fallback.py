@@ -98,7 +98,7 @@ def test_gateway_flag_is_supported_but_later_consumers_remain_refused():
     policy = DeliveryPolicy.from_config(GATEWAY_ENABLED)
     policy.assert_supported()
     assert policy.gateway_enabled
-    for flag in ("tui_enabled", "repair_enabled"):
+    for flag in ("repair_enabled",):
         with pytest.raises(RuntimeError, match="later phase"):
             DeliveryPolicy.from_config(
                 {"kanban": {"completion_inbox": {flag: True}}}

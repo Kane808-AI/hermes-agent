@@ -96,10 +96,13 @@ def _native_agent(state, session_id):
     return agent
 
 
-def test_delivery_policy_keeps_cli_and_gateway_consumers_separately_opted_in():
+def test_delivery_policy_keeps_foreground_and_gateway_consumers_separately_opted_in():
     DeliveryPolicy.from_config(ENABLED).assert_supported()
     DeliveryPolicy.from_config(GATEWAY_ENABLED).assert_supported()
-    for key in ("tui_enabled", "repair_enabled"):
+    policy = DeliveryPolicy.from_config({"kanban": {"completion_inbox": {"tui_enabled": True}}})
+    policy.assert_supported()
+    assert policy.tui_enabled and not policy.cli_enabled and not policy.gateway_enabled
+    for key in ("repair_enabled",):
         with pytest.raises(RuntimeError, match="later phase"):
             DeliveryPolicy.from_config(
                 {"kanban": {"completion_inbox": {key: True}}}

@@ -215,6 +215,9 @@ def publish_response(state, conn, record: dict, rows: list[dict], terminal_index
     state._check_transcript_write_guards(conn, record["session_id"], compression_lock_holder,
                                         turn_lease_holder=turn_lease_holder, reject_active_turn_lease=True)
     terminal["display_metadata"] = {**(terminal.get("display_metadata") or {}), **linkage(record, "response")}
+    # Native notification silence can mark staged output hidden. The committed
+    # terminal response is visible on hydration, with the exact receipt linkage.
+    terminal["display_kind"] = "completion_inbox"
     # These are fresh, staged turn rows. Reuse native repair and row identity handling.
     from agent.transcript_repair import resolve_and_repair_transcript_batch
     fresh = resolve_and_repair_transcript_batch(

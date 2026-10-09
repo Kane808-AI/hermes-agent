@@ -1887,8 +1887,8 @@ DEFAULT_CONFIG = {
     },
     # Kanban dispatcher: reclaim, promote, and spawn assigned profiles. One dispatcher per profile.
     "kanban": {
-        # Only explicit opt-ins enable capture or a completion consumer. TUI and
-        # repair remain reserved and fail closed until later phases.
+        # Only explicit opt-ins enable capture or a completion consumer.
+        # Repair remains reserved and fails closed until a later phase.
         "completion_inbox": {
             "producer_enabled": False,
             "cli_enabled": False,

@@ -185,7 +185,7 @@ def test_concurrent_initializers_keep_one_board_identity(tmp_path):
         assert len(set(pool.map(initialize, range(8)))) == 1
 
 
-def test_phase_five_gateway_flag_is_supported_but_later_flags_are_refused(board):
+def test_foreground_and_gateway_flags_are_supported_but_repair_is_refused(board):
     from hermes_cli.kanban_delivery import configure_producer
 
     policy = configure_producer(
@@ -196,7 +196,7 @@ def test_phase_five_gateway_flag_is_supported_but_later_flags_are_refused(board)
         board, {"kanban": {"completion_inbox": {"gateway_enabled": True}}}
     )
     assert gateway.gateway_enabled
-    for flag in ("tui_enabled", "repair_enabled"):
+    for flag in ("repair_enabled",):
         with pytest.raises(RuntimeError, match="later phase"):
             configure_producer(board, {"kanban": {"completion_inbox": {flag: True}}})
     assert board.execute("SELECT producer_enabled FROM kanban_delivery_control").fetchone()[0] == 0
