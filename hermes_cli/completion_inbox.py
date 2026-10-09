@@ -5,6 +5,7 @@ import json
 import os
 import time
 import uuid
+from contextlib import nullcontext
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -33,15 +34,17 @@ class CompletionInbox:
     lock profile before board.
     """
 
-    def __init__(self, board, state, return_route_id: str):
+    def __init__(self, board, state, return_route_id: str, *, authority_guard=None):
         assert_trusted_route_writer()
         self._board, self.state = board, state
+        self._authority_guard = authority_guard or nullcontext
         self.board_id = board_uuid(board)
         self.route = state.resolve_kanban_return_route(return_route_id, self.board_id)
         if self.route is None:
             raise PermissionError("completion route does not belong to this board/profile")
         self.pid, self.started = process_identity()
-        state._execute_write(self._bind_authority)
+        with self._authority_guard():
+            state._execute_write(self._bind_authority)
         with state._lock:
             store.initialize_store(state._conn, state.db_path, profile=True)
         self.board_path = Path(board.execute("PRAGMA database_list").fetchone()[2])
@@ -72,29 +75,21 @@ class CompletionInbox:
 
     def _bind_authority(self, conn):
         """Bind the route to its verified live compression tip and exact authority."""
-        chain = self._compression_chain_on_conn(conn, self.route["session_id"])
-        if not chain:
-            raise PermissionError("completion route has no verified session lineage")
-        rows = conn.execute(
-            f"SELECT id,source,started_at FROM sessions WHERE id IN "
-            f"({','.join('?' for _ in chain)})",
-            tuple(chain),
-        ).fetchall()
-        by_id = {row["id"]: row for row in rows}
-        if len(by_id) != len(chain) or any(
-            str(by_id[session_id]["source"] or "").lower() != "cli"
-            for session_id in chain
-        ):
-            raise PermissionError("completion lineage is not classic CLI")
+        route, chain, incarnations = self.state._kanban_route_lineage_on_conn(
+            conn,
+            self.route["return_route_id"],
+            self.board_id,
+            str(self.state.db_path.resolve()),
+        )
+        if route != self.route:
+            raise PermissionError("completion route changed")
         authority = conn.execute(
             "SELECT * FROM kanban_session_consumers WHERE session_id=?", (chain[-1],)
         ).fetchone()
         if authority is None:
             raise PermissionError("absent consumer authority")
         self.lineage = tuple(chain)
-        self.lineage_incarnations = {
-            session_id: by_id[session_id]["started_at"] for session_id in chain
-        }
+        self.lineage_incarnations = incarnations
         self.session_id = chain[-1]
         self.session_started_at = self.lineage_incarnations[self.session_id]
         self.fence, self.owner = authority["consumer_fence"], authority["lease_owner"]
@@ -102,30 +97,39 @@ class CompletionInbox:
 
     def _validate_authority(self, conn, *, allow_missing_route=False):
         assert_trusted_route_writer()
-        origin = conn.execute(
-            "SELECT source,started_at FROM sessions WHERE id=?", (self.route["session_id"],)
-        ).fetchone()
-        if origin is None or str(origin["source"] or "").lower() != "cli" \
-                or origin["started_at"] != self.route["session_started_at"]:
-            raise PermissionError("completion session incarnation changed")
         route = conn.execute("SELECT * FROM kanban_return_routes WHERE return_route_id=?",
                              (self.route["return_route_id"],)).fetchone()
         if (route is None and not allow_missing_route) or (route is not None and dict(route) != self.route) \
                 or self.route["owner_state_path"] != str(self.state.db_path.resolve()):
             raise PermissionError("completion route changed or missing")
-        chain = self._compression_chain_on_conn(conn, self.route["session_id"])
-        if tuple(chain) != self.lineage or chain[-1] != self.session_id:
+        if route is None and allow_missing_route:
+            chain = self._compression_chain_on_conn(conn, self.route["session_id"])
+            allowed = {
+                "cli": {"cli"},
+                "tui": {"tui"},
+                "desktop": {"tui", "desktop"},
+            }.get(self.route["surface"], set())
+            rows = conn.execute(
+                f"SELECT id,source,started_at FROM sessions WHERE id IN "
+                f"({','.join('?' for _ in chain)})",
+                tuple(chain),
+            ).fetchall()
+            incarnations = {
+                row["id"]: row["started_at"]
+                for row in rows
+                if str(row["source"] or "").lower() in allowed
+            }
+            verified_route = self.route
+        else:
+            verified_route, chain, incarnations = self.state._kanban_route_lineage_on_conn(
+                conn,
+                self.route["return_route_id"],
+                self.board_id,
+                str(self.state.db_path.resolve()),
+            )
+        if verified_route != self.route or tuple(chain) != self.lineage \
+                or not chain or chain[-1] != self.session_id:
             raise PermissionError("completion live compression lineage changed")
-        sessions = conn.execute(
-            f"SELECT id,source,started_at FROM sessions WHERE id IN "
-            f"({','.join('?' for _ in chain)})",
-            tuple(chain),
-        ).fetchall()
-        incarnations = {
-            row["id"]: row["started_at"]
-            for row in sessions
-            if str(row["source"] or "").lower() == "cli"
-        }
         if incarnations != self.lineage_incarnations:
             raise PermissionError("completion lineage session incarnation changed")
         live = conn.execute("SELECT * FROM kanban_session_consumers WHERE session_id=?",
@@ -167,9 +171,10 @@ class CompletionInbox:
                         return operation(conn, expires)
                 finally:
                     _BOARD_CONNECTION.reset(token)
-        if rows is not None:
-            return self.state._execute_transcript_write(transact, rows)
-        return self.state._execute_write(transact)
+        with self._authority_guard():
+            if rows is not None:
+                return self.state._execute_transcript_write(transact, rows)
+            return self.state._execute_write(transact)
 
     def claim(self, delivery_id: str) -> dict:
         def claim_on_conn(conn, expires):

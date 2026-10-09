@@ -31,6 +31,9 @@ ENABLED = {
         }
     }
 }
+GATEWAY_ENABLED = {
+    "kanban": {"completion_inbox": {"gateway_enabled": True}}
+}
 
 
 def _active_lease(tmp_path, state, session_id="session"):
@@ -93,9 +96,10 @@ def _native_agent(state, session_id):
     return agent
 
 
-def test_delivery_policy_enables_only_classic_cli_consumer():
+def test_delivery_policy_keeps_cli_and_gateway_consumers_separately_opted_in():
     DeliveryPolicy.from_config(ENABLED).assert_supported()
-    for key in ("gateway_enabled", "tui_enabled", "repair_enabled"):
+    DeliveryPolicy.from_config(GATEWAY_ENABLED).assert_supported()
+    for key in ("tui_enabled", "repair_enabled"):
         with pytest.raises(RuntimeError, match="later phase"):
             DeliveryPolicy.from_config(
                 {"kanban": {"completion_inbox": {key: True}}}

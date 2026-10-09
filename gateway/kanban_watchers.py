@@ -57,6 +57,32 @@ class GatewayKanbanWatchersMixin:
             await asyncio.sleep(min(1.0, interval - slept))
             slept += 1.0
 
+    async def _kanban_completion_watcher(self, interval: float = 5.0) -> None:
+        """Run the opt-in fallback once per served profile and never outside its scope."""
+        from gateway.kanban_completion_fallback import poll_gateway_completion_profile
+        from gateway.run import _multiplex_profile_homes
+        from hermes_constants import get_hermes_home
+
+        await asyncio.sleep(5)
+        while self._running:
+            if getattr(self.config, "multiplex_profiles", False):
+                profiles = _multiplex_profile_homes(self.config)
+            else:
+                profiles = [(self._active_profile_name(), Path(get_hermes_home()))]
+            for profile_name, profile_home in profiles:
+                if not self._running:
+                    break
+                try:
+                    await poll_gateway_completion_profile(self, profile_home)
+                except Exception as exc:  # health: allow BLE001 -- one profile failure must not stop other profile ticks
+                    logger.warning(
+                        "gateway completion tick failed for profile %s: %s",
+                        profile_name,
+                        exc,
+                        exc_info=True,
+                    )
+            await self._sleep_between_ticks(interval)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
 

@@ -62,8 +62,8 @@ class DeliveryPolicy:
         return cls(**values, acknowledged_retention_days=retention)
 
     def assert_supported(self):
-        if self.gateway_enabled or self.tui_enabled or self.repair_enabled:
-            raise RuntimeError("non-CLI completion consumers and repair require a later phase")
+        if self.tui_enabled or self.repair_enabled:
+            raise RuntimeError("TUI completion consumption and repair require a later phase")
 
 
 def board_uuid(conn: sqlite3.Connection) -> str:

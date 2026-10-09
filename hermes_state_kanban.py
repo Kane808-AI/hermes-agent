@@ -9,6 +9,11 @@ from hermes_cli.sqlite_migration_backup import migration_backup
 
 KANBAN_ROUTE_SCHEMA_VERSION = 1
 KANBAN_CONSUMER_LEASE_SECONDS = 30
+_KANBAN_ROUTE_SOURCES = {
+    "cli": frozenset({"cli"}),
+    "tui": frozenset({"tui"}),
+    "desktop": frozenset({"tui", "desktop"}),
+}
 KANBAN_ROUTE_SCHEMA_SQL = """
 BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS kanban_route_schema (
@@ -161,6 +166,62 @@ class SessionKanbanRoutesMixin:
         return dict(row)
 
     @staticmethod
+    def _kanban_route_lineage_on_conn(conn, route_id: str, board_uuid: str, owner: str):
+        """Resolve an immutable route through canonical compression edges only."""
+        from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+
+        route = conn.execute(
+            "SELECT * FROM kanban_return_routes WHERE return_route_id=? "
+            "AND board_uuid=? AND owner_state_path=?",
+            (route_id, board_uuid, owner),
+        ).fetchone()
+        if route is None:
+            raise PermissionError("completion route does not belong to this board/profile")
+        allowed_sources = _KANBAN_ROUTE_SOURCES.get(str(route["surface"] or "").lower())
+        origin = conn.execute(
+            "SELECT source,started_at FROM sessions WHERE id=?", (route["session_id"],)
+        ).fetchone()
+        if allowed_sources is None or origin is None \
+                or origin["started_at"] != route["session_started_at"] \
+                or str(origin["source"] or "").lower() not in allowed_sources:
+            raise PermissionError("completion route session incarnation changed")
+
+        lineage = [route["session_id"]]
+        incarnations = {route["session_id"]: origin["started_at"]}
+        seen = set(lineage)
+        current_id = route["session_id"]
+        for _ in range(_CHAIN_CAP):
+            child = conn.execute(_CHAIN_STEP_SQL, (current_id,)).fetchone()
+            child_id = child["id"] if child is not None else None
+            if not child_id or child_id in seen:
+                break
+            session = conn.execute(
+                "SELECT source,started_at FROM sessions WHERE id=?", (child_id,)
+            ).fetchone()
+            if session is None or str(session["source"] or "").lower() not in allowed_sources:
+                raise PermissionError("completion compression lineage changed surface")
+            lineage.append(child_id)
+            incarnations[child_id] = session["started_at"]
+            seen.add(child_id)
+            current_id = child_id
+        return dict(route), tuple(lineage), incarnations
+
+    def resolve_kanban_completion_lineage(self, route_id: str, board_uuid: str) -> dict:
+        """Return the verified route-to-live-tip lineage from this exact profile."""
+        owner = str(self.db_path.resolve())
+        with self._read_ctx() as conn:
+            route, lineage, incarnations = self._kanban_route_lineage_on_conn(
+                conn, route_id, board_uuid, owner
+            )
+        return {
+            "route": route,
+            "lineage": lineage,
+            "incarnations": incarnations,
+            "session_id": lineage[-1],
+            "surface": route["surface"],
+        }
+
+    @staticmethod
     def _consumer_ttl(ttl_seconds: int) -> int:
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
             raise ValueError("consumer lease duration must be an integer")
@@ -264,6 +325,157 @@ class SessionKanbanRoutesMixin:
             ).fetchone())
 
         return self._execute_write(acquire)
+
+    def acquire_kanban_gateway_consumer(
+        self,
+        route_id: str,
+        board_uuid: str,
+        lease_owner: str,
+        *,
+        ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
+    ) -> dict | None:
+        """Claim a route-derived live tip for the gateway with a monotonic fence."""
+        assert_trusted_route_writer()
+        if not isinstance(lease_owner, str) or not lease_owner.startswith("gateway:"):
+            raise ValueError("gateway consumer lease owner is invalid")
+        ttl = self._consumer_ttl(ttl_seconds)
+        pid, started = process_identity()
+        now = int(time.time())
+        owner = str(self.db_path.resolve())
+
+        def acquire(conn):
+            route, lineage, incarnations = self._kanban_route_lineage_on_conn(
+                conn, route_id, board_uuid, owner
+            )
+            session_id = lineage[-1]
+            current = conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
+            ).fetchone()
+            same_live_owner = bool(
+                current is not None
+                and current["lease_owner"] == lease_owner
+                and current["owner_pid"] == pid
+                and current["owner_started_at"] == started
+                and current["session_started_at"] == incarnations[session_id]
+                and (current["lease_expires_at"] or 0) > now
+            )
+            if current is not None and (current["lease_expires_at"] or 0) > now \
+                    and str(current["lease_owner"] or "").startswith("gateway:") \
+                    and not same_live_owner:
+                return None
+            placeholders = ",".join("?" for _ in lineage)
+            prior = conn.execute(
+                "SELECT MAX(c.consumer_fence) FROM kanban_session_consumers c "
+                "JOIN sessions s ON s.id=c.session_id AND s.started_at=c.session_started_at "
+                f"WHERE c.session_id IN ({placeholders})",
+                lineage,
+            ).fetchone()
+            lineage_fence = int(prior[0] or 0)
+            current_fence = int(current["consumer_fence"] or 0) if current is not None else 0
+            fence = current_fence if same_live_owner and current_fence >= lineage_fence \
+                else lineage_fence + 1
+            expires = now + ttl
+            conn.execute(
+                "INSERT INTO kanban_session_consumers "
+                "(session_id,consumer_fence,lease_owner,lease_expires_at,owner_pid,"
+                "owner_started_at,session_started_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "consumer_fence=excluded.consumer_fence,lease_owner=excluded.lease_owner,"
+                "lease_expires_at=excluded.lease_expires_at,owner_pid=excluded.owner_pid,"
+                "owner_started_at=excluded.owner_started_at,session_started_at=excluded.session_started_at",
+                (
+                    session_id,
+                    fence,
+                    lease_owner,
+                    expires,
+                    pid,
+                    started,
+                    incarnations[session_id],
+                ),
+            )
+            authority = dict(conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
+            ).fetchone())
+            authority.update({
+                "return_route_id": route["return_route_id"],
+                "surface": route["surface"],
+                "lineage": lineage,
+            })
+            return authority
+
+        return self._execute_write(acquire)
+
+    def renew_kanban_gateway_consumer(
+        self,
+        route_id: str,
+        board_uuid: str,
+        lease_owner: str,
+        consumer_fence: int,
+        *,
+        ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
+    ) -> dict | None:
+        """Renew only the exact route tip, process incarnation, owner, and fence."""
+        assert_trusted_route_writer()
+        ttl = self._consumer_ttl(ttl_seconds)
+        pid, started = process_identity()
+        now = int(time.time())
+        owner = str(self.db_path.resolve())
+
+        def renew(conn):
+            route, lineage, incarnations = self._kanban_route_lineage_on_conn(
+                conn, route_id, board_uuid, owner
+            )
+            session_id = lineage[-1]
+            cursor = conn.execute(
+                "UPDATE kanban_session_consumers SET lease_expires_at=? "
+                "WHERE session_id=? AND consumer_fence=? AND lease_owner=? "
+                "AND owner_pid=? AND owner_started_at=? AND session_started_at=? "
+                "AND lease_expires_at>?",
+                (
+                    now + ttl,
+                    session_id,
+                    consumer_fence,
+                    lease_owner,
+                    pid,
+                    started,
+                    incarnations[session_id],
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            authority = dict(conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
+            ).fetchone())
+            authority.update({
+                "return_route_id": route["return_route_id"],
+                "surface": route["surface"],
+                "lineage": lineage,
+            })
+            return authority
+
+        return self._execute_write(renew)
+
+    def release_kanban_gateway_consumer(
+        self, session_id: str, lease_owner: str, consumer_fence: int
+    ) -> bool:
+        """Release only the exact gateway process incarnation, retaining its fence."""
+        assert_trusted_route_writer()
+        if not isinstance(lease_owner, str) or not lease_owner.startswith("gateway:"):
+            return False
+        pid, started = process_identity()
+
+        def release(conn):
+            cursor = conn.execute(
+                "UPDATE kanban_session_consumers SET lease_owner=NULL,lease_expires_at=NULL,"
+                "owner_pid=NULL,owner_started_at=NULL "
+                "WHERE session_id=? AND consumer_fence=? AND lease_owner=? "
+                "AND owner_pid=? AND owner_started_at=?",
+                (session_id, consumer_fence, lease_owner, pid, started),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(release))
 
     def transfer_kanban_cli_consumer(
         self,
