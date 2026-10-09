@@ -168,6 +168,34 @@ class SessionKanbanRoutesMixin:
             raise ValueError("consumer lease duration must be between 5 and 300 seconds")
         return ttl_seconds
 
+    @staticmethod
+    def _kanban_cli_compression_lineage_on_conn(conn, session_id: str) -> list[str]:
+        """Return exact canonical CLI ancestors through ``session_id``."""
+        from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+
+        lineage = [session_id]
+        seen = {session_id}
+        current_id = session_id
+        for _ in range(_CHAIN_CAP):
+            current = conn.execute(
+                "SELECT parent_session_id FROM sessions WHERE id=?", (current_id,)
+            ).fetchone()
+            parent_id = current["parent_session_id"] if current is not None else None
+            if not parent_id or parent_id in seen:
+                break
+            parent = conn.execute(
+                "SELECT source FROM sessions WHERE id=?", (parent_id,)
+            ).fetchone()
+            canonical = conn.execute(_CHAIN_STEP_SQL, (parent_id,)).fetchone()
+            if parent is None or str(parent["source"] or "").lower() != "cli" \
+                    or canonical is None or canonical["id"] != current_id:
+                break
+            lineage.append(parent_id)
+            seen.add(parent_id)
+            current_id = parent_id
+        lineage.reverse()
+        return lineage
+
     def acquire_kanban_cli_consumer(
         self,
         session_id: str,
@@ -197,6 +225,15 @@ class SessionKanbanRoutesMixin:
                 raise ValueError("consumer requires a persisted current session")
             if str(session["source"] or "").lower() != "cli":
                 raise ValueError("consumer session is not an interactive CLI session")
+            lineage = self._kanban_cli_compression_lineage_on_conn(conn, session_id)
+            placeholders = ",".join("?" for _ in lineage)
+            prior = conn.execute(
+                "SELECT MAX(c.consumer_fence) FROM kanban_session_consumers c "
+                "JOIN sessions s ON s.id=c.session_id AND s.started_at=c.session_started_at "
+                f"WHERE c.session_id IN ({placeholders})",
+                tuple(lineage),
+            ).fetchone()
+            lineage_fence = int(prior[0] or 0)
             current = conn.execute(
                 "SELECT * FROM kanban_session_consumers WHERE session_id=?", (session_id,)
             ).fetchone()
@@ -208,9 +245,9 @@ class SessionKanbanRoutesMixin:
                 and current["session_started_at"] == session["started_at"]
                 and (current["lease_expires_at"] or 0) > now
             )
-            fence = int(current["consumer_fence"] or 0) if same_live_owner else (
-                int(current["consumer_fence"] or 0) + 1 if current is not None else 1
-            )
+            current_fence = int(current["consumer_fence"] or 0) if current is not None else 0
+            fence = current_fence if same_live_owner and current_fence >= lineage_fence \
+                else lineage_fence + 1
             expires = now + ttl
             conn.execute(
                 "INSERT INTO kanban_session_consumers "

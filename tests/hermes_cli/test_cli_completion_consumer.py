@@ -474,6 +474,102 @@ def test_poll_recovers_ancestor_checkpoint_after_compression(tmp_path, monkeypat
         lease.release()
 
 
+def test_poll_recovers_reanchor_crash_after_another_compression(tmp_path, monkeypatch):
+    from hermes_cli import cli_completion_consumer as consumer_module
+    from hermes_cli.completion_inbox import CompletionInbox
+    from tests.agent.test_run_agent import _mock_response
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    board_path = tmp_path / "board.db"
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state, \
+            kbc.connect_closing(board_path) as board:
+        state.create_session("reanchor-a", source="cli")
+        route = state.create_kanban_return_route(
+            board_uuid(board), "reanchor-a", surface="cli", interactive=True
+        )
+        with trusted_board_controller(state):
+            configure_producer(board, ENABLED)
+        with trusted_return_route(state, board, route):
+            task = kb.create_task(board, title="reanchor crash")
+        with kb.write_txn(board):
+            kb._append_event(board, task, "completed", {"result": "recover on c"})
+        delivery_id = board.execute("SELECT id FROM kanban_deliveries").fetchone()[0]
+
+        lease = _active_lease(tmp_path, state, "reanchor-a")
+        agent = _native_agent(state, "reanchor-a")
+        cli = _cli(state, lease, "reanchor-a")
+        cli.agent = agent
+        presented = []
+        cli._present_completion_inbox_response = presented.append
+
+        on_a = CompletionInbox(board, state, route)
+        on_a.claim(delivery_id)
+        on_a.admit(delivery_id)
+        marker_a = board.execute(
+            "SELECT marker_message_id FROM kanban_deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()[0]
+
+        state.end_session("reanchor-a", "compression")
+        state.create_session("reanchor-b", source="cli", parent_session_id="reanchor-a")
+        state.append_message("reanchor-b", "assistant", "summary b")
+        assert consumer_module.refresh_external_transcript(cli, force=True)
+
+        on_b = CompletionInbox(board, state, route)
+        on_b.claim(delivery_id)
+        with pytest.raises(RuntimeError, match="crash after replacement marker"):
+            on_b.admit(
+                delivery_id,
+                after_marker=lambda: (_ for _ in ()).throw(
+                    RuntimeError("crash after replacement marker")
+                ),
+            )
+        record_b = state._read_one(
+            "SELECT * FROM kanban_inbox_transcripts WHERE delivery_id=?", (delivery_id,)
+        )
+        delivery_b = board.execute(
+            "SELECT state,marker_message_id FROM kanban_deliveries WHERE id=?",
+            (delivery_id,),
+        ).fetchone()
+        assert record_b["session_id"] == "reanchor-b"
+        assert tuple(delivery_b) == ("leased", marker_a)
+
+        state.end_session("reanchor-b", "compression")
+        state.create_session("reanchor-c", source="cli", parent_session_id="reanchor-b")
+        state.append_message("reanchor-c", "assistant", "summary c")
+        assert consumer_module.refresh_external_transcript(cli, force=True)
+
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="recovered on c"
+        )
+        monkeypatch.setattr(consumer_module, "discover_board_paths", lambda: [board_path])
+        assert consumer_module.poll_completion_inbox(cli) == 1
+
+        delivery = board.execute(
+            "SELECT state FROM kanban_deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        record = state._read_one(
+            "SELECT * FROM kanban_inbox_transcripts WHERE delivery_id=?", (delivery_id,)
+        )
+        tip_messages = [
+            message for message in state.get_messages("reanchor-c")
+            if (message.get("display_metadata") or {}).get("completion_inbox")
+        ]
+        assert delivery["state"] == "acknowledged"
+        assert record["session_id"] == "reanchor-c"
+        assert [
+            message["display_metadata"]["completion_inbox"]["kind"]
+            for message in tip_messages
+        ] == ["marker", "response"]
+        assert presented == ["recovered on c"]
+        assert agent.client.chat.completions.create.call_count == 1
+
+        agent.client.chat.completions.create.reset_mock()
+        assert consumer_module.poll_completion_inbox(cli) == 0
+        agent.client.chat.completions.create.assert_not_called()
+        lease.release()
+
+
 def test_route_discovery_uses_canonical_tip_when_stale_sibling_exists(tmp_path):
     from hermes_cli.cli_completion_consumer import _route_map
 

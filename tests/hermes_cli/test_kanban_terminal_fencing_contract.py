@@ -91,6 +91,24 @@ def test_verified_compression_transfer_advances_the_parent_fence(tmp_path):
         lease.release()
 
 
+def test_restart_on_verified_compression_tip_advances_ancestor_fence(tmp_path):
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state:
+        state.create_session("restart-parent", source="cli")
+        parent = _lease(tmp_path, state, session_id="restart-parent")
+        parent_fence = _row(state, "restart-parent")["consumer_fence"]
+
+        state.end_session("restart-parent", "compression")
+        state.create_session(
+            "restart-tip", source="cli", parent_session_id="restart-parent"
+        )
+        # Reopening after a process restart has no in-memory parent lease to transfer.
+        parent.release()
+        reopened = _lease(tmp_path, state, session_id="restart-tip")
+
+        assert _row(state, "restart-tip")["consumer_fence"] > parent_fence
+        reopened.release()
+
+
 def test_consumer_fence_cannot_transfer_to_unrelated_session(tmp_path):
     with contextlib.closing(SessionDB(tmp_path / "state.db")) as state:
         state.create_session("owned", source="cli")

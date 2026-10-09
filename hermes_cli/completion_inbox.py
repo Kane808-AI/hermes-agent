@@ -217,7 +217,7 @@ class CompletionInbox:
 
     def _is_reanchored_marker_gap(self, conn, delivery, record) -> bool:
         """Verify the profile-marker commit that precedes its board admission update."""
-        if delivery["state"] != "leased" or record["session_id"] != self.session_id:
+        if delivery["state"] != "leased" or record["session_id"] not in self.lineage:
             return False
         old = conn.execute(
             "SELECT session_id,role,display_metadata FROM messages WHERE id=?",
@@ -229,9 +229,11 @@ class CompletionInbox:
             "turn_id": record["turn_id"],
             "kind": "marker",
         }
+        old_session_id = old["session_id"] if old is not None else None
         return bool(
             old is not None
-            and old["session_id"] in self.lineage
+            and old_session_id in self.lineage
+            and self.lineage.index(old_session_id) < self.lineage.index(record["session_id"])
             and old["role"] == "user"
             and json.loads(old["display_metadata"] or "{}").get("completion_inbox") == expected
         )
