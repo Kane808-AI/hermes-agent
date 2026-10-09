@@ -41,6 +41,7 @@ def _route_map(state) -> dict[str, str]:
 
 
 def _pending_deliveries(board, routes: dict[str, str]) -> list[dict]:
+    """Snapshot one oldest actionable delivery per route, bounding claim attempts."""
     if not routes:
         return []
     from hermes_cli.kanban_delivery_schema import check_delivery_schema
@@ -55,11 +56,14 @@ def _pending_deliveries(board, routes: dict[str, str]) -> list[dict]:
         return []
     placeholders = ",".join("?" for _ in route_ids)
     rows = board.execute(
-        f"SELECT id,return_route_id FROM kanban_deliveries "
+        "SELECT id,return_route_id FROM ("
+        "SELECT id,return_route_id,event_id,ROW_NUMBER() OVER ("
+        "PARTITION BY return_route_id ORDER BY event_id,id) AS route_rank "
+        "FROM kanban_deliveries "
         f"WHERE return_route_id IN ({placeholders}) "
         "AND state IN ('pending','leased','transcript_admitted','processed') "
-        "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
-        "ORDER BY event_id,id LIMIT 100",
+        "AND (next_attempt_at IS NULL OR next_attempt_at<=?)) "
+        "WHERE route_rank=1 ORDER BY event_id,id",
         (*route_ids, int(time.time())),
     ).fetchall()
     return [dict(row) for row in rows]

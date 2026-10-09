@@ -166,6 +166,57 @@ def test_gateway_never_claims_while_a_valid_foreground_lineage_lease_exists(
     lease.release()
 
 
+def test_gateway_reaches_route_after_100_foreground_blocked_deliveries(world):
+    from gateway.kanban_completion_fallback import _claim_next
+
+    with kb.write_txn(world.board):
+        for _ in range(99):
+            kb._append_event(world.board, world.task, "completed", {"result": "worker done"})
+    world.state.create_session("route-b", source="cli")
+    route_b = world.state.create_kanban_return_route(
+        world.board_id, "route-b", surface="cli", interactive=True
+    )
+    with trusted_return_route(world.state, world.board, route_b):
+        task_b = kb.create_task(world.board, title="reachable fallback")
+    with kb.write_txn(world.board):
+        kb._append_event(world.board, task_b, "completed", {"result": "worker done"})
+
+    deliveries = world.board.execute(
+        "SELECT id,return_route_id FROM kanban_deliveries ORDER BY event_id,id"
+    ).fetchall()
+    assert [row["return_route_id"] for row in deliveries] == [world.route] * 100 + [route_b]
+    with contextlib.ExitStack() as cleanup:
+        foreground, refusal = try_acquire_active_session(
+            session_id="route-parent",
+            surface="cli",
+            config={},
+            registry_home=world.root,
+            metadata={"live_session_id": "route-parent"},
+            track_liveness=True,
+        )
+        assert refusal is None and foreground is not None
+        cleanup.callback(foreground.release)
+        work = _claim_next(
+            world.state, GATEWAY_ENABLED, world.root, [world.board_path]
+        )
+        assert work is not None
+        cleanup.callback(work.claim.release)
+        assert work.board_path == world.board_path.resolve()
+        assert work.route_id == route_b
+        assert work.delivery_id == deliveries[-1]["id"]
+        assert work.claim.session_id == "route-b"
+        assert world.state._read_one(
+            "SELECT 1 FROM kanban_session_consumers WHERE session_id='route-parent'"
+        ) is None
+        assert world.board.execute(
+            "SELECT COUNT(*) FROM kanban_deliveries WHERE state='pending'"
+        ).fetchone()[0] == 101
+        # With A foreground-owned and B consumer-owned, the finite scan exhausts.
+        assert _claim_next(
+            world.state, GATEWAY_ENABLED, world.root, [world.board_path]
+        ) is None
+
+
 def test_gateway_claim_is_profile_pinned_and_fails_closed_on_registry_mismatch(world, tmp_path):
     from hermes_cli.active_sessions import acquire_gateway_completion_consumer
 
