@@ -6,6 +6,10 @@ Phase 5 starts from independently approved revision
 `59ee60ac1ce2915bd2efb960dfe6a913614abf33` and is implemented by
 `0dea60bb7111593588f2fa689e27cd28a427ce85`.
 
+The Phase 5 queue-starvation follow-up is implemented by
+`a7ce4ef78855bb7fb30a38f4ab4a83f28f48a2d5`, based on receipt revision
+`4935daa51c1ecb4ca5b2d271bd190f4f669aad28`. Its verification receipt appears below.
+
 This phase adds the gateway as an opt-in fallback completion consumer. The gateway claims a
 routed delivery only when no valid foreground CLI, TUI, or Desktop active-session lease exists
 anywhere on the route's canonical compression lineage. It derives the immutable route and live
@@ -238,3 +242,139 @@ This verification receipt is the only file in the separate receipt commit.
   in the live tip transcript when that surface resumes, but this phase adds no live surface push.
 - The existing classic CLI render-before-ack duplicate-display crash window remains documented.
 - Windows-only paths were not executed on this macOS verification host.
+
+## Queue-starvation follow-up receipt (2026-10-09)
+
+Implementation: `a7ce4ef78855bb7fb30a38f4ab4a83f28f48a2d5`.
+Exact base: `4935daa51c1ecb4ca5b2d271bd190f4f669aad28`.
+The implementation commit contains only `gateway/kanban_completion_fallback.py` and
+`tests/gateway/test_kanban_completion_fallback.py`. This receipt is committed separately.
+
+The previous candidate query selected the oldest 100 actionable deliveries before checking
+foreground ownership. A foreground-owned route with 100 deliveries therefore hid a later
+delivery on another route on every poll.
+
+The query now snapshots the oldest actionable delivery for each eligible route using
+`ROW_NUMBER() OVER (PARTITION BY return_route_id ORDER BY event_id,id)`. Actionable states and
+retry readiness are filtered before ranking. Route heads retain global `event_id,id` ordering.
+Each board scan returns at most one candidate per matching route in the fixed route map, so
+claim attempts are bounded by that route count. It uses one finite SQL snapshot and introduces
+no rescan loop or moving queue tail. The SQL still considers the matching actionable rows to
+rank them, so this is a bound on candidate materialization and claim attempts, not a constant
+query-time guarantee independent of queue size.
+
+The existing foreground exclusion, profile pinning, session-consumer acquisition, per-turn
+leasing, marker/receipt/effect fencing, and execution path are unchanged. Producer and consumer
+defaults remain false. No activation, live migration, service restart, configuration change,
+repair loop, history replay, JEV, hosted egress, or Phase 6 implementation was performed.
+AgentVault was not modified. No push or merge was performed.
+
+### Regression and snapshot provenance
+
+The new behavior test is
+`tests/gateway/test_kanban_completion_fallback.py::test_gateway_reaches_route_after_100_foreground_blocked_deliveries`.
+It produces exactly 100 deliveries for CLI route A followed by one for CLI route B, holds a
+valid foreground active-session lease on A, and calls `_claim_next()` with gateway opt-in.
+It requires B's exact delivery and session, no gateway consumer on A, and all 101 delivery rows
+still pending because selection only acquires the session consumer. A second call while A has
+its foreground owner and B has its consumer owner must exhaust the scan and return `None`.
+
+Artifacts are under
+`/private/tmp/hermes-completion-phase01.G1Ybro/phase5-starvation.yFJTBJ/`.
+The `base/` directory was extracted from `git archive 4935daa51c1ecb4ca5b2d271bd190f4f669aad28`.
+Only the new test file was overlaid for the red run, before changing production code. The test
+file was subsequently restored from the exact base for the broader baseline comparison.
+The `candidate/` directory was extracted from the same base archive with only the two
+implementation files overlaid. Their Git blob IDs were verified against the implementation
+commit after testing:
+
+| File | Verified blob ID |
+| --- | --- |
+| `gateway/kanban_completion_fallback.py` | `61af22127375ab0ef774dbd22a615eb0b7ee8c0f` |
+| `tests/gateway/test_kanban_completion_fallback.py` | `3639d13d900788634f87c5833555a8faeede36d2` |
+
+The base gateway module's blob was also verified as
+`8471a7456238cf2fcbe582572b21e1d96ea12d4d`. Both snapshots contain the gateway module, avoiding
+the missing-module editable-install fallback described in the original Phase 5 red evidence.
+Archive runs print `fatal: not a git repository` during optional bytecode precompilation, then
+collect and execute the tests normally.
+
+### Results
+
+All tests used `scripts/run_tests.sh` with
+`HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python`
+(Python 3.14.7 on macOS), disposable stores, and `--file-retries 0`.
+
+| Verification | Exact result |
+| --- | --- |
+| New regression on exact base plus test overlay | **0 passed, 1 failed, 13 deselected**, exit 1. `_claim_next()` returned `None`, failing `assert work is not None` at test line 202. |
+| Same regression on fixed worktree | **1 passed, 0 failed**, exit 0. |
+| Entire Phase 5 fallback file in candidate snapshot | **14 passed, 0 failed**, exit 0. |
+| Combined foundation, saga, Phase 4, Phase 5, and affected ownership suites, 15 files | **272 passed, 0 failed**, exit 0. |
+| Broader candidate comparison, same 26 files listed above | **320 passed, 1 failed, 1 skipped, 4 strict xfailed**, exit 1. |
+| Same 26 files on exact base | **320 passed, 1 failed, 1 skipped, 4 strict xfailed**, exit 1. |
+| Failure comparison | Identical single failure ID and normalized assertion cause. No new failure. |
+| `python scripts/check` and receipt `python scripts/check --staged` | **11 checks passed in each run, 0 code-health blockers, 0 advisories**. |
+| Implementation-range, unstaged, and staged whitespace checks | **Passed**. |
+
+The sole shared failure remains
+`tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card`
+at line 578: `assert res.auto_blocked == []` receives one generated task ID instead of an empty
+list. The two failure sections match after normalizing that task ID. This is pre-existing and
+outside the starvation fix. `test_concurrent_initializers_keep_one_board_identity` passed in
+both broader runs, so the documented intermittent WAL-preflight race did not occur.
+The four strict expected failures preserve the Phase 6 TUI crash contracts. The skipped test
+requires Windows. There is no remaining blocker for this scoped Phase 5 fix.
+
+### Reproduction commands and evidence
+
+From `base/` with the regression test overlay, and then from the fixed worktree:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/gateway/test_kanban_completion_fallback.py \
+  -k test_gateway_reaches_route_after_100_foreground_blocked_deliveries \
+  -q --tb=short --file-retries 0 -j 1
+```
+
+From `candidate/`, run the same command without `-k` for the entire fallback file. The combined
+affected suite is the union of the original combined and affected commands above:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh \
+  tests/gateway/test_kanban_completion_fallback.py \
+  tests/gateway/test_turn_lease.py \
+  tests/gateway/test_kanban_multiplex_served_profile_parity.py \
+  tests/hermes_cli/test_active_sessions.py \
+  tests/hermes_cli/test_active_session_exclusivity.py \
+  tests/hermes_cli/test_cli_active_session_limit.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  tests/hermes_cli/test_completion_inbox_saga.py \
+  tests/hermes_cli/test_kanban_delivery.py \
+  tests/hermes_cli/test_kanban_delivery_config.py \
+  tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_state/test_kanban_return_routes.py \
+  tests/hermes_cli/test_kanban_delivery_migration.py \
+  tests/hermes_cli/test_kanban_delivery_review.py \
+  tests/hermes_cli/test_sqlite_migration_backup.py \
+  -q --tb=short --file-retries 0 -j 4
+```
+
+The broader comparison used the exact 26-file command under **Exact verification commands**
+above, once from the restored `base/` and once from `candidate/`, with the same interpreter,
+`-q --tb=short --file-retries 0 -j 4`.
+
+Repository checks in the implementation worktree:
+
+```bash
+/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python scripts/check
+/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python scripts/check --staged
+git diff --check 4935daa51c1ecb4ca5b2d271bd190f4f669aad28..a7ce4ef78855bb7fb30a38f4ab4a83f28f48a2d5
+git diff --check
+git diff --cached --check
+```
+
+Logs in the artifact directory: `red.log`, `green.log`, `gateway.log`, `affected.log`,
+`regression-base.log`, `regression-candidate.log`, `check.log`, and `receipt-check.log`. Temporary artifacts may
+disappear after cleanup or reboot. This committed receipt preserves the results and commands.
