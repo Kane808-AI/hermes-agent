@@ -6,7 +6,8 @@ Phase 4 starts from approved revision
 `25db90f21ad52cd75c7aa4ede95c070f713bb4e9` and is implemented by
 `c542a76d0419893ce86bbafffa5c86dd6e2c0e35`. The verified-compression-lineage
 continuity fix is `9cf313f8568848b8a74e9eac263375d4eef94368`. The independent-review blocker
-fix is `9338737c58fd48e524d48f214b732da6b1ce0e6a`.
+fix is `9338737c58fd48e524d48f214b732da6b1ce0e6a`. The restart and multi-compression
+recovery fix is `08dcf1112b0c65c098118b4e8f82ffe70bc8b0af`.
 
 Only the classic interactive CLI can consume completion deliveries in this phase. The
 `cli_enabled` flag remains false by default and must be explicitly enabled. One-shot CLI,
@@ -29,6 +30,132 @@ current-turn authority, exact durable tool-plan matching, atomic linked receipts
 acknowledgement, crash recovery, transactional effect deduplication, and suppression of
 completion-execution output. The CLI renders only the committed assistant receipt, then
 acknowledges the delivery.
+
+## Restart and multi-compression recovery fixes
+
+The next independent review reproduced two additional recovery gaps:
+
+1. If compression committed and the process restarted before the in-memory consumer transfer,
+   ordinary child acquisition started at fence `1` instead of advancing the verified ancestor
+   fence. A delivery retained by another fence-`1` owner could not be reclaimed.
+2. If replacement marker B committed after A's board admission, the process crashed before the
+   board update, and the session then compressed to C, recovery rejected B's ledger because it
+   was not already owned by C.
+
+Consumer acquisition now walks backward from the requested session only through canonical
+persisted compression edges selected by the same forward-chain rule. Every retained ancestor
+must be classic CLI. The new authority advances the maximum consumer fence whose stored session
+incarnation exactly matches a session in that chain. Noncanonical siblings, unrelated sessions,
+other surfaces, and deleted or recreated incarnations cannot contribute a fence.
+
+Crash-gap validation now accepts an uncommitted ledger on any exact pinned lineage ancestor. It
+still requires a leased delivery, the exact board, route, delivery, turn, role, marker metadata,
+ledger marker UID, and session incarnations. The board marker must be on an earlier pinned
+ancestor than the ledger marker, so recovery can move only forward through the verified lineage.
+The real poll path then reanchors the marker on C, commits one receipt there, acknowledges the
+delivery, and does no inference or effects on a second poll.
+
+### Follow-up regression results
+
+| Verification | Exact result |
+| --- | --- |
+| Restart acquisition red on `952ee50fe31318eb5453174ca91546627ddcc919` | **0 passed, 1 failed, 18 deselected**. Parent and child fences were both `1`, so `assert 1 > 1` failed. |
+| Multi-compression crash recovery red on the same revision | **0 passed, 1 failed, 13 deselected**. The real poll path failed with `RuntimeError: completion identity mismatch`. |
+| Phase 4 contracts on the exact implementation archive | **33 passed, 0 failed**. |
+| Combined foundation, saga, and Phase 4 suite | **211 passed, 0 failed**. |
+| Byte-exact 14-file affected suite | **200 passed, 0 failed, 4 platform skips**. |
+| 26-file candidate regression | **320 passed, 1 failed, 1 skipped, 4 strict xfailed**. |
+| Same 26 files on the clean starting revision rerun | **319 passed, 1 failed, 1 skipped, 4 strict xfailed**. |
+| Candidate/base failure-ID comparison | **Identical single failure ID**, with no new failure. The candidate adds one passing restart-fence contract to this suite. |
+| `scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. The existing reviewed BLE001 comment remains accepted. |
+| Committed-range, unstaged, and staged whitespace checks | **Passed**. |
+
+The shared regression failure remains
+`tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card`,
+the documented `auto_blocked` assertion. The first base comparison run reported **318 passed,
+2 failed, 1 skipped, 4 strict xfailed** because it also hit the documented intermittent
+WAL-preflight race in
+`test_concurrent_initializers_keep_one_board_identity`. The exact base rerun passed that test
+and produced the single shared failure above. The candidate did not hit the race.
+
+### Follow-up red evidence and snapshot provenance
+
+The red directory `/private/tmp/hermes-completion-phase4-review2-red.0yTMVn` was created from an
+exact archive of `952ee50fe31318eb5453174ca91546627ddcc919`. Only the final two contract files
+were copied into it. The regressions were run separately before implementation. This directory
+is intentionally a test overlay, not a byte-exact candidate.
+
+The candidate directory `/private/tmp/hermes-completion-phase4-review2-candidate.8Y76Gj` was
+created directly with `git archive 08dcf1112b0c65c098118b4e8f82ffe70bc8b0af`. No file was
+copied or overlaid after extraction. All candidate suite results above used this exact archive.
+
+The comparison base `/private/tmp/hermes-completion-phase4-review2-base.2pM7lZ` was created
+directly with `git archive 952ee50fe31318eb5453174ca91546627ddcc919` and had no overlay.
+Both exact snapshots lack `.git`, so the optional precompile printed
+`fatal: not a git repository`. Test collection and execution continued normally.
+
+### Exact follow-up commands
+
+Red snapshot creation:
+
+```bash
+git archive 952ee50fe31318eb5453174ca91546627ddcc919 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review2-red.0yTMVn
+cp tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  /private/tmp/hermes-completion-phase4-review2-red.0yTMVn/tests/hermes_cli/
+```
+
+Independent red regressions, run from that red directory:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k restart_on_verified_compression_tip_advances_ancestor_fence
+
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k poll_recovers_reanchor_crash_after_another_compression
+```
+
+Exact implementation and comparison snapshots:
+
+```bash
+git archive 08dcf1112b0c65c098118b4e8f82ffe70bc8b0af | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review2-candidate.8Y76Gj
+git archive 952ee50fe31318eb5453174ca91546627ddcc919 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review2-base.2pM7lZ
+```
+
+The exact candidate used the unchanged two-file Phase 4, nine-file combined, 14-file affected,
+and 26-file regression `scripts/run_tests.sh` command blocks documented below. The exact base
+used the same 26-file command. Every run used `--file-retries 0`.
+
+Failure comparison and repository checks:
+
+```bash
+diff -u \
+  <(grep '^FAILED ' /private/tmp/hermes-completion-phase4-review2-regression-base-rerun.log | sort -u) \
+  <(grep '^FAILED ' /private/tmp/hermes-completion-phase4-review2-regression-candidate.log | sort -u)
+scripts/check
+git diff --check 952ee50fe31318eb5453174ca91546627ddcc919..08dcf1112b0c65c098118b4e8f82ffe70bc8b0af
+git diff --check
+git diff --cached --check
+```
+
+Follow-up logs:
+
+- `/private/tmp/hermes-completion-phase4-review2-red-fence.log`
+- `/private/tmp/hermes-completion-phase4-review2-red-reanchor.log`
+- `/private/tmp/hermes-completion-phase4-review2-narrow-exact.log`
+- `/private/tmp/hermes-completion-phase4-review2-combined-exact.log`
+- `/private/tmp/hermes-completion-phase4-review2-affected-exact.log`
+- `/private/tmp/hermes-completion-phase4-review2-regression-candidate.log`
+- `/private/tmp/hermes-completion-phase4-review2-regression-base.log`
+- `/private/tmp/hermes-completion-phase4-review2-regression-base-rerun.log`
+- `/private/tmp/hermes-completion-phase4-review2-check.log`
 
 ## Independent-review blocker fixes
 
@@ -492,6 +619,16 @@ Final logs:
 - `/private/tmp/hermes-completion-phase4-check-final.log`
 
 ## Changed files
+
+Restart and multi-compression recovery fix:
+
+- `hermes_cli/completion_inbox.py`
+- `hermes_state_kanban.py`
+- `tests/hermes_cli/test_cli_completion_consumer.py`
+- `tests/hermes_cli/test_kanban_terminal_fencing_contract.py`
+
+Its separate verification receipt revision changes only
+`website/docs/developer-guide/kanban-completion-cli-consumer.md`.
 
 Independent-review blocker fix:
 
