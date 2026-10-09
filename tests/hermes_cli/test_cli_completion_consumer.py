@@ -4,6 +4,7 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -64,6 +65,32 @@ def _cli(state, lease, session_id="session"):
         _kanban_completion_cursor=None,
         _present_completion_inbox_response=lambda content: None,
     )
+
+
+def _native_agent(state, session_id):
+    with patch("model_tools.get_tool_definitions", return_value=[]), \
+            patch("model_tools.check_toolset_requirements", return_value={}), \
+            patch("agent.process_bootstrap.OpenAI"):
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            skip_background_review=True,
+            session_id=session_id,
+            session_db=state,
+        )
+    agent.client = MagicMock()
+    agent.valid_tool_names = {"kanban_comment"}
+    agent._cached_system_prompt = "Stored byte-stable prompt."
+    agent._use_prompt_caching = False
+    agent.tool_delay = 0
+    agent.compression_enabled = False
+    agent.context_compressor._micro_compact_enabled = False
+    agent._memory_manager = None
+    agent.save_trajectories = False
+    return agent
 
 
 def test_delivery_policy_enables_only_classic_cli_consumer():
@@ -157,7 +184,7 @@ def test_compression_tip_reload_transfers_registry_and_consumer_fence(tmp_path):
             "SELECT consumer_fence,lease_owner FROM kanban_session_consumers WHERE session_id='tip'"
         )
         assert old["lease_owner"] is None
-        assert new["consumer_fence"] == 1 and new["lease_owner"] == lease.lease_id
+        assert new["consumer_fence"] == 2 and new["lease_owner"] == lease.lease_id
         assert [m["content"] for m in cli.conversation_history] == ["summary"]
         lease.release()
 
@@ -227,7 +254,6 @@ def test_poll_consumes_parent_route_once_on_verified_live_compression_tip(tmp_pa
     """A route stays on parent A while its receipt follows the verified live tip B."""
     from hermes_cli import cli_completion_consumer as consumer_module
     from tests.agent.test_run_agent import _mock_response, _mock_tool_call
-    from unittest.mock import MagicMock, patch
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -247,28 +273,7 @@ def test_poll_consumes_parent_route_once_on_verified_live_compression_tip(tmp_pa
         delivery_id = board.execute("SELECT id FROM kanban_deliveries").fetchone()[0]
 
         lease = _active_lease(tmp_path, state, "parent-a")
-        with patch("model_tools.get_tool_definitions", return_value=[]), \
-                patch("model_tools.check_toolset_requirements", return_value={}), \
-                patch("agent.process_bootstrap.OpenAI"):
-            agent = AIAgent(
-                api_key="test-key",
-                base_url="https://openrouter.ai/api/v1",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-                skip_background_review=True,
-                session_id="parent-a",
-                session_db=state,
-            )
-        agent.client = MagicMock()
-        agent.valid_tool_names = {"kanban_comment"}
-        agent._cached_system_prompt = "Stored byte-stable prompt."
-        agent._use_prompt_caching = False
-        agent.tool_delay = 0
-        agent.compression_enabled = False
-        agent.context_compressor._micro_compact_enabled = False
-        agent._memory_manager = None
-        agent.save_trajectories = False
+        agent = _native_agent(state, "parent-a")
 
         cli = _cli(state, lease, "parent-a")
         cli.agent = agent
@@ -336,6 +341,155 @@ def test_poll_consumes_parent_route_once_on_verified_live_compression_tip(tmp_pa
             if (message.get("display_metadata") or {}).get("completion_inbox", {}).get("kind") == "response"
         ]) == 1
         lease.release()
+
+
+@pytest.mark.parametrize("checkpoint", ["admitted_marker", "committed_receipt"])
+def test_poll_recovers_ancestor_checkpoint_after_compression(tmp_path, monkeypatch, checkpoint):
+    from hermes_cli import cli_completion_consumer as consumer_module
+    from hermes_cli.completion_inbox import CompletionInbox
+    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    board_path = tmp_path / "board.db"
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state, \
+            kbc.connect_closing(board_path) as board:
+        state.create_session("checkpoint-parent", source="cli")
+        route = state.create_kanban_return_route(
+            board_uuid(board), "checkpoint-parent", surface="cli", interactive=True
+        )
+        with trusted_board_controller(state):
+            configure_producer(board, ENABLED)
+        with trusted_return_route(state, board, route):
+            task = kb.create_task(board, title="checkpoint before compression")
+        with kb.write_txn(board):
+            kb._append_event(board, task, "completed", {"result": checkpoint})
+        delivery_id = board.execute("SELECT id FROM kanban_deliveries").fetchone()[0]
+
+        lease = _active_lease(tmp_path, state, "checkpoint-parent")
+        agent = _native_agent(state, "checkpoint-parent")
+        cli = _cli(state, lease, "checkpoint-parent")
+        cli.agent = agent
+        presented = []
+        cli._present_completion_inbox_response = presented.append
+
+        original = CompletionInbox(board, state, route)
+        original.claim(delivery_id)
+        original.admit(delivery_id)
+        expected = "recovered admitted marker"
+        effect_args = {"task_id": task, "body": "one recovered effect"}
+        if checkpoint == "admitted_marker":
+            holder = "pre-compression-effect"
+            assert state.try_acquire_session_turn_lease("checkpoint-parent", holder)
+            try:
+                original.authorize_staged_turn(
+                    delivery_id,
+                    [{"role": "assistant", "tool_calls": [{"function": {
+                        "name": "kanban_comment", "arguments": json.dumps(effect_args)
+                    }}]}],
+                    turn_lease_holder=holder,
+                )
+                original.effect(
+                    delivery_id,
+                    0,
+                    "kanban_comment",
+                    effect_args,
+                    turn_lease_holder=holder,
+                )
+            finally:
+                state.release_session_turn_lease("checkpoint-parent", holder)
+        else:
+            expected = "recovered committed receipt"
+            holder = "pre-compression-turn"
+            assert state.try_acquire_session_turn_lease("checkpoint-parent", holder)
+            try:
+                original.publish(
+                    delivery_id,
+                    [{"role": "assistant", "content": expected}],
+                    0,
+                    turn_lease_holder=holder,
+                )
+            finally:
+                state.release_session_turn_lease("checkpoint-parent", holder)
+
+        state.end_session("checkpoint-parent", "compression")
+        state.create_session(
+            "checkpoint-tip", source="cli", parent_session_id="checkpoint-parent"
+        )
+        state.append_message("checkpoint-tip", "user", "compressed context")
+        state.append_message("checkpoint-tip", "assistant", "compression summary")
+        assert consumer_module.refresh_external_transcript(cli, force=True)
+        assert cli.session_id == agent.session_id == lease.session_id == "checkpoint-tip"
+
+        if checkpoint == "admitted_marker":
+            tool = _mock_tool_call(
+                name="kanban_comment",
+                call_id="recovered-lineage-effect",
+                arguments=json.dumps(effect_args),
+            )
+            agent.client.chat.completions.create.side_effect = [
+                _mock_response(content=None, tool_calls=[tool], finish_reason="tool_calls"),
+                _mock_response(content=expected)
+            ]
+        else:
+            agent.client.chat.completions.create.reset_mock()
+        monkeypatch.setattr(consumer_module, "discover_board_paths", lambda: [board_path])
+
+        assert consumer_module.poll_completion_inbox(cli) == 1
+        assert board.execute(
+            "SELECT state FROM kanban_deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()[0] == "acknowledged"
+        record = state._read_one(
+            "SELECT * FROM kanban_inbox_transcripts WHERE delivery_id=?", (delivery_id,)
+        )
+        parent_messages = [
+            message for message in state.get_messages("checkpoint-parent")
+            if (message.get("display_metadata") or {}).get("completion_inbox")
+        ]
+        tip_messages = [
+            message for message in state.get_messages("checkpoint-tip")
+            if (message.get("display_metadata") or {}).get("completion_inbox")
+        ]
+        assert presented == [expected]
+        assert sum(
+            (message.get("display_metadata") or {}).get("completion_inbox", {}).get("kind") == "response"
+            for message in parent_messages + tip_messages
+        ) == 1
+        if checkpoint == "admitted_marker":
+            assert record["session_id"] == "checkpoint-tip"
+            assert [
+                (message.get("display_metadata") or {})["completion_inbox"]["kind"]
+                for message in tip_messages
+            ] == ["marker", "response"]
+            assert agent.client.chat.completions.create.call_count == 2
+            assert len(kb.list_comments(board, task)) == 1
+        else:
+            assert record["session_id"] == "checkpoint-parent"
+            assert tip_messages == []
+            agent.client.chat.completions.create.assert_not_called()
+
+        agent.client.chat.completions.create.reset_mock()
+        assert consumer_module.poll_completion_inbox(cli) == 0
+        agent.client.chat.completions.create.assert_not_called()
+        lease.release()
+
+
+def test_route_discovery_uses_canonical_tip_when_stale_sibling_exists(tmp_path):
+    from hermes_cli.cli_completion_consumer import _route_map
+
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state, \
+            kbc.connect_closing(tmp_path / "board.db") as board:
+        state.create_session("route-parent", source="cli")
+        route = state.create_kanban_return_route(
+            board_uuid(board), "route-parent", surface="cli", interactive=True
+        )
+        state.end_session("route-parent", "compression")
+        state.create_session("stale-sibling", source="cli", parent_session_id="route-parent")
+        state.end_session("stale-sibling", "ws_orphan_reap")
+        state.create_session("live-tip", source="cli", parent_session_id="route-parent")
+
+        assert state.get_compression_tip("route-parent") == "live-tip"
+        assert _route_map(state, "live-tip") == {route: board_uuid(board)}
 
 
 def test_chat_stops_before_staging_when_consumer_authority_is_unavailable(monkeypatch):

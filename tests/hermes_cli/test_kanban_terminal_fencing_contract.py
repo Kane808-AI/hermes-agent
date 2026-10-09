@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from hermes_cli.active_sessions import try_acquire_active_session
+from hermes_cli.active_sessions import transfer_active_session, try_acquire_active_session
 from hermes_state import SessionDB
 
 
@@ -64,6 +64,48 @@ def test_expired_heartbeat_reacquires_with_a_new_fence(tmp_path):
         )
         assert lease.heartbeat_completion_consumer()
         assert _row(state)["consumer_fence"] == 2
+        lease.release()
+
+
+def test_verified_compression_transfer_advances_the_parent_fence(tmp_path):
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state:
+        state.create_session("parent", source="cli")
+        lease = _lease(tmp_path, state, session_id="parent")
+        state._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE kanban_session_consumers SET lease_expires_at=0 WHERE session_id='parent'"
+            )
+        )
+        assert lease.heartbeat_completion_consumer()
+        parent_fence = _row(state, "parent")["consumer_fence"]
+        assert parent_fence == 2
+
+        state.end_session("parent", "compression")
+        state.create_session("tip", source="cli", parent_session_id="parent")
+        assert transfer_active_session(
+            lease, session_id="tip", metadata={"live_session_id": "tip"}
+        )
+
+        assert _row(state, "tip")["consumer_fence"] > parent_fence
+        assert _row(state, "parent")["lease_owner"] is None
+        lease.release()
+
+
+def test_consumer_fence_cannot_transfer_to_unrelated_session(tmp_path):
+    with contextlib.closing(SessionDB(tmp_path / "state.db")) as state:
+        state.create_session("owned", source="cli")
+        state.create_session("new-session", source="cli")
+        lease = _lease(tmp_path, state, session_id="owned")
+
+        with pytest.raises(PermissionError, match="verified compression"):
+            state.transfer_kanban_cli_consumer(
+                "owned",
+                "new-session",
+                lease.lease_id,
+                lease.consumer_fence,
+            )
+
+        assert _row(state, "new-session") is None
         lease.release()
 
 

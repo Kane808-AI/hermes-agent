@@ -228,6 +228,110 @@ class SessionKanbanRoutesMixin:
 
         return self._execute_write(acquire)
 
+    def transfer_kanban_cli_consumer(
+        self,
+        old_session_id: str,
+        new_session_id: str,
+        lease_owner: str,
+        consumer_fence: int,
+        *,
+        ttl_seconds: int = KANBAN_CONSUMER_LEASE_SECONDS,
+    ) -> dict | None:
+        """Advance authority across the canonical persisted compression chain only."""
+        assert_trusted_route_writer()
+        if not isinstance(lease_owner, str) or not lease_owner.strip():
+            raise ValueError("consumer lease owner is required")
+        if old_session_id == new_session_id:
+            raise ValueError("consumer compression transfer requires a new session")
+        ttl = self._consumer_ttl(ttl_seconds)
+        pid, started = process_identity()
+        now = int(time.time())
+
+        def transfer(conn):
+            from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+
+            chain = [old_session_id]
+            seen = set(chain)
+            current_id = old_session_id
+            for _ in range(_CHAIN_CAP):
+                row = conn.execute(_CHAIN_STEP_SQL, (current_id,)).fetchone()
+                child_id = row["id"] if row is not None else None
+                if not child_id or child_id in seen:
+                    break
+                chain.append(child_id)
+                seen.add(child_id)
+                current_id = child_id
+            if len(chain) < 2 or chain[-1] != new_session_id:
+                raise PermissionError("consumer transfer is not a verified compression handoff")
+            sessions = conn.execute(
+                f"SELECT id,source,started_at FROM sessions WHERE id IN "
+                f"({','.join('?' for _ in chain)})",
+                tuple(chain),
+            ).fetchall()
+            by_id = {row["id"]: row for row in sessions}
+            if len(by_id) != len(chain) or any(
+                str(by_id[session_id]["source"] or "").lower() != "cli"
+                for session_id in chain
+            ):
+                raise PermissionError("consumer compression lineage is not classic CLI")
+            old = conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?",
+                (old_session_id,),
+            ).fetchone()
+            if old is None or old["consumer_fence"] != consumer_fence \
+                    or old["lease_owner"] != lease_owner or old["owner_pid"] != pid \
+                    or old["owner_started_at"] != started \
+                    or old["session_started_at"] != by_id[old_session_id]["started_at"] \
+                    or (old["lease_expires_at"] or 0) <= now:
+                return None
+            current = conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?",
+                (new_session_id,),
+            ).fetchone()
+            same_live_owner = bool(
+                current is not None
+                and current["lease_owner"] == lease_owner
+                and current["owner_pid"] == pid
+                and current["owner_started_at"] == started
+                and current["session_started_at"] == by_id[new_session_id]["started_at"]
+                and (current["lease_expires_at"] or 0) > now
+            )
+            if current is not None and (current["lease_expires_at"] or 0) > now \
+                    and not same_live_owner:
+                raise PermissionError("compression tip already has a live consumer")
+            if same_live_owner and int(current["consumer_fence"] or 0) > consumer_fence:
+                fence = int(current["consumer_fence"])
+            else:
+                fence = max(
+                    consumer_fence,
+                    int(current["consumer_fence"] or 0) if current is not None else 0,
+                ) + 1
+            expires = now + ttl
+            conn.execute(
+                "INSERT INTO kanban_session_consumers "
+                "(session_id,consumer_fence,lease_owner,lease_expires_at,owner_pid,"
+                "owner_started_at,session_started_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "consumer_fence=excluded.consumer_fence,lease_owner=excluded.lease_owner,"
+                "lease_expires_at=excluded.lease_expires_at,owner_pid=excluded.owner_pid,"
+                "owner_started_at=excluded.owner_started_at,session_started_at=excluded.session_started_at",
+                (
+                    new_session_id,
+                    fence,
+                    lease_owner,
+                    expires,
+                    pid,
+                    started,
+                    by_id[new_session_id]["started_at"],
+                ),
+            )
+            return dict(conn.execute(
+                "SELECT * FROM kanban_session_consumers WHERE session_id=?",
+                (new_session_id,),
+            ).fetchone())
+
+        return self._execute_write(transfer)
+
     def renew_kanban_cli_consumer(
         self,
         session_id: str,

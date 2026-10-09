@@ -143,6 +143,63 @@ def insert_marker(state, conn, record: dict, content: str) -> dict:
     return ledger(conn, record["board_uuid"], record["delivery_id"])
 
 
+def reanchor_marker(
+    state,
+    conn,
+    record: dict,
+    *,
+    session_id: str,
+    session_started_at: float,
+    content: str,
+) -> dict:
+    """Move an uncommitted marker to the verified live tip without changing its turn."""
+    if record["response_message_id"] is not None:
+        raise RuntimeError("committed completion receipt cannot be reanchored")
+    verify_messages(conn, record)
+    state._check_transcript_write_guards(
+        conn,
+        session_id,
+        None,
+        reject_active_turn_lease=True,
+        reject_active_compression_lock=True,
+    )
+    replacement = {
+        **record,
+        "session_id": session_id,
+        "session_started_at": session_started_at,
+    }
+    message = {
+        "role": "user",
+        "content": content,
+        "display_kind": "completion_inbox",
+        "display_metadata": linkage(replacement, "marker"),
+        "timestamp": time.time(),
+    }
+    inserted, tools = state._insert_message_rows(conn, session_id, [message])
+    state._bump_session_counters(conn, session_id, inserted, tools, unit=False)
+    cursor = conn.execute(
+        "UPDATE kanban_inbox_transcripts SET session_id=?,session_started_at=?,"
+        "marker_message_id=?,marker_message_uid=? "
+        "WHERE board_uuid=? AND delivery_id=? AND session_id=? AND session_started_at=? "
+        "AND marker_message_id=? AND marker_message_uid=? AND response_message_id IS NULL",
+        (
+            session_id,
+            session_started_at,
+            message["_row_id"],
+            message["message_uid"],
+            record["board_uuid"],
+            record["delivery_id"],
+            record["session_id"],
+            record["session_started_at"],
+            record["marker_message_id"],
+            record["marker_message_uid"],
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError("completion marker reanchor lost its exact identity")
+    return ledger(conn, record["board_uuid"], record["delivery_id"])
+
+
 def publish_response(state, conn, record: dict, rows: list[dict], terminal_index: int, *,
                      fence: int, turn_lease_holder: str | None, compression_lock_holder: str | None) -> dict:
     if record["response_message_id"] is not None:

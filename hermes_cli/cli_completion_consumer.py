@@ -160,18 +160,17 @@ def _route_map(state, session_id: str) -> dict[str, str]:
     session = state.get_session(session_id)
     if session is None or str(session["source"] or "").lower() != "cli":
         return {}
-    lineage = state.get_compression_lineage(session_id)
-    if not lineage or lineage[-1] != session_id:
-        return {}
-    placeholders = ",".join("?" for _ in lineage)
     rows = state._read_all(
-        "SELECT r.return_route_id,r.board_uuid FROM kanban_return_routes r "
+        "SELECT r.return_route_id,r.board_uuid,r.session_id FROM kanban_return_routes r "
         "JOIN sessions s ON s.id=r.session_id AND s.started_at=r.session_started_at "
-        f"WHERE r.session_id IN ({placeholders}) AND r.surface='cli' "
-        "AND r.owner_state_path=?",
-        (*lineage, str(state.db_path.resolve())),
+        "WHERE r.surface='cli' AND r.owner_state_path=?",
+        (str(state.db_path.resolve()),),
     )
-    return {str(row["return_route_id"]): str(row["board_uuid"]) for row in rows}
+    return {
+        str(row["return_route_id"]): str(row["board_uuid"])
+        for row in rows
+        if state.get_compression_tip(str(row["session_id"])) == session_id
+    }
 
 
 def _pending_delivery(board, routes: dict[str, str]) -> dict | None:
@@ -223,10 +222,13 @@ def _present_receipt(cli, receipt: dict) -> None:
     if not response_id:
         raise RuntimeError("completion receipt has no response message")
     state = cli._session_db
+    receipt_session_id = str(receipt.get("session_id") or getattr(cli, "session_id", "") or "")
+    if not receipt_session_id:
+        raise RuntimeError("completion receipt has no owning session")
     response = next(
         (
             message
-            for message in state.get_messages(cli.session_id)
+            for message in state.get_messages(receipt_session_id)
             if message.get("id") == response_id and message.get("role") == "assistant"
         ),
         None,

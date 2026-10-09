@@ -717,9 +717,19 @@ def transfer_active_session(
             old_fence = lease.consumer_fence
             if lease.consumer_state is not None and old_fence is not None:
                 try:
-                    new_authority = lease.consumer_state.acquire_kanban_cli_consumer(
-                        new_session_id, lease.lease_id
-                    )
+                    if lease.consumer_state.get_compression_tip(old_session_id) == new_session_id:
+                        new_authority = lease.consumer_state.transfer_kanban_cli_consumer(
+                            old_session_id,
+                            new_session_id,
+                            lease.lease_id,
+                            old_fence,
+                        )
+                        if new_authority is None:
+                            raise PermissionError("stale completion consumer authority")
+                    else:
+                        new_authority = lease.consumer_state.acquire_kanban_cli_consumer(
+                            new_session_id, lease.lease_id
+                        )
                 except Exception:
                     logger.warning(
                         "Refused completion consumer transfer from %s to %s",
