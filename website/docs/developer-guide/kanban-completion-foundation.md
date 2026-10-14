@@ -92,7 +92,7 @@ minimum-writer versions are refused before migration, including cached board ope
 Existing files receive private SQLite online-backup snapshots that include committed WAL
 frames, named `*.before-kanban-delivery-v1.bak` and `*.before-kanban-routes-v1.bak`.
 The review follow-up uses board schema/writer version 2. Upgrading the reviewed v1 extension
-also creates `*.before-kanban-delivery-v2.bak`, preserves board identity and obligations, and
+also creates `*.before-kanban-delivery-v3.bak`, preserves board identity and obligations, and
 disables capture until a trusted controller explicitly claims it. The v1 protection triggers
 are replaced only inside this schema-upgrade transaction, without a task mutation.
 Backup publication fsyncs the containing directory after the create-once hard link, including
