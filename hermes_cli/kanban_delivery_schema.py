@@ -241,6 +241,10 @@ def migrate_delivery_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TRIGGER kanban_capture_delivery")
             execute_ddl(conn, DELIVERY_TRIGGERS)
             _add_outcome_columns(conn)
+            # The v1 upgrade introduces controller_id and the route-binding guard, so
+            # capture ownership is unknown: producer_enabled resets to 0 until a trusted
+            # controller re-claims the board (an enabled producer without a controller is
+            # refused by check_delivery_schema).
             conn.execute("UPDATE kanban_delivery_control SET schema_version=?,min_writer_version=?,producer_enabled=0",
                          (DELIVERY_SCHEMA_VERSION, DELIVERY_WRITER_VERSION))
             return
@@ -250,6 +254,9 @@ def migrate_delivery_schema(conn: sqlite3.Connection) -> None:
             # The capture trigger embeds DELIVERY_SCHEMA_VERSION; recreate it for v3.
             conn.execute("DROP TRIGGER kanban_capture_delivery")
             execute_ddl(conn, DELIVERY_TRIGGERS)
+            # Unlike the v1 upgrade, this step is additive (consumer outcome columns only)
+            # and does not touch controller_id, so producer_enabled and min_writer_version
+            # are deliberately preserved.
             conn.execute("UPDATE kanban_delivery_control SET schema_version=? WHERE singleton=1",
                          (DELIVERY_SCHEMA_VERSION,))
             return

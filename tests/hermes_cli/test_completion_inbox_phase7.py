@@ -1,6 +1,7 @@
 """Phase 7 contracts: actionability diagnostics, Atlas outcomes, and repair dry-run."""
 import contextlib
 import json
+import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -164,25 +165,89 @@ def test_record_outcome_requires_processed_delivery(stores):
 
 # --- Repair dry run ---
 
-def test_repair_dry_run_reports_historical_miss_without_mutating(tmp_path, monkeypatch):
+
+@pytest.fixture
+def producer(tmp_path, monkeypatch):
+    """A board with the producer enabled and a bound return route, no task yet."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    with kbc.connect_closing(tmp_path / "board.db") as board:
-        tid = kb.create_task(board, title="historical")
-        kb._append_event(board, tid, "completed", {"result": "missed"})
-        report = completion_inbox_repair_dry_run(board)
-        assert report["dry_run"] is True
-        assert report["miss_count"] == 1
-        assert report["misses"][0]["kind"] == "completed"
-        assert report["misses"][0]["has_return_route"] is False
-        # Dry run must not create a delivery.
-        assert not board.execute("SELECT 1 FROM kanban_deliveries").fetchone()
+    with kbc.connect_closing(tmp_path / "board.db") as board, \
+            contextlib.closing(SessionDB(tmp_path / "state.db")) as state:
+        state.create_session("session", source="cli")
+        route = state.create_kanban_return_route(board_uuid(board), "session", surface="cli", interactive=True)
+        with trusted_board_controller(state):
+            configure_producer(board, {"kanban": {"completion_inbox": {"producer_enabled": True}}})
+        yield SimpleNamespace(board=board, state=state, route=route, root=tmp_path)
+
+
+def test_repair_dry_run_counts_eligible_miss(producer):
+    with trusted_return_route(producer.state, producer.board, producer.route):
+        task = kb.create_task(producer.board, title="routed")
+    # Disable capture so the trigger does not mint a delivery, then insert a
+    # captured-flagged actionable event: an eligible miss.
+    producer.board.execute("UPDATE kanban_delivery_control SET producer_enabled=0 WHERE singleton=1")
+    producer.board.execute(
+        "INSERT INTO task_events(task_id,kind,payload,created_at,producer_version,delivery_expected) "
+        "VALUES (?,?,?,?,?,1)",
+        (task, "completed", json.dumps({"result": "x"}), int(time.time()), 2))
+    report = completion_inbox_repair_dry_run(producer.board)
+    assert report["extension_installed"] is True
+    assert report["miss_count"] == 1
+    assert report["misses"][0]["task_id"] == task
+    assert report["unroutable_count"] == 0
+
+
+def test_repair_dry_run_reports_unroutable_separately(producer):
+    task = kb.create_task(producer.board, title="unrouted")  # no route scope
+    kb._append_event(producer.board, task, "completed", {"result": "x"})
+    report = completion_inbox_repair_dry_run(producer.board)
+    assert report["miss_count"] == 0
+    assert report["unroutable_count"] == 1
+    assert report["unroutable"][0]["task_id"] == task
 
 
 def test_repair_dry_run_excludes_delivered_events(stores):
     report = completion_inbox_repair_dry_run(stores.board)
+    assert report["extension_installed"] is True
     assert report["miss_count"] == 0
+    assert report["unroutable_count"] == 0
+
+
+def test_repair_dry_run_is_read_only(producer):
+    task = kb.create_task(producer.board, title="unrouted")
+    kb._append_event(producer.board, task, "completed", {"result": "x"})
+    before_deliveries = producer.board.execute("SELECT COUNT(*) FROM kanban_deliveries").fetchone()[0]
+    before_events = producer.board.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+    completion_inbox_repair_dry_run(producer.board)
+    assert producer.board.execute("SELECT COUNT(*) FROM kanban_deliveries").fetchone()[0] == before_deliveries
+    assert producer.board.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == before_events
+
+
+def _raw_board(path):
+    """Base kanban schema without the delivery extension (no delivery tables)."""
+    with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as conn:
+        conn.executescript(kb.SCHEMA_SQL)
+        conn.execute("INSERT INTO tasks(id,title,status,created_at) VALUES ('old','old task','done',1)")
+        conn.execute("INSERT INTO task_events(task_id,kind,created_at) VALUES ('old','completed',1)")
+    return path
+
+
+def test_repair_dry_run_unmigrated_board_returns_report(tmp_path):
+    path = _raw_board(tmp_path / "unmigrated.db")
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        report = completion_inbox_repair_dry_run(conn)
+    assert report["dry_run"] is True
+    assert report["extension_installed"] is False
+    assert report["miss_count"] == 0
+    assert report["unroutable_count"] == 0
+
+
+def test_diagnostics_unmigrated_board_returns_report(tmp_path):
+    path = _raw_board(tmp_path / "unmigrated.db")
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        report = completion_inbox_diagnostics(conn)
+    assert report["extension_installed"] is False
 
 
 # --- v2 -> v3 delivery-schema migration ---
@@ -207,3 +272,27 @@ def test_v2_upgrade_adds_outcome_columns_and_preserves_identity(tmp_path):
         assert {"outcome", "outcome_reason", "outcome_at"} <= cols
         assert schema.check_delivery_schema(conn, require_capture=True)
     assert path.with_name("v2.db.before-kanban-delivery-v3.bak").is_file()
+
+
+def test_v2_upgrade_preserves_producer_enabled(tmp_path):
+    """Pin the deliberate migration policy: v2 -> v3 preserves producer_enabled.
+
+    The v1 -> v3 path resets producer_enabled (it introduces controller_id, so
+    capture ownership must be re-claimed); that reset is pinned by
+    tests/hermes_cli/test_kanban_delivery_migration.py. The v2 -> v3 path is
+    additive only, so producer_enabled and its controller must survive.
+    """
+    path = tmp_path / "v2-enabled.db"
+    with kbc.connect_closing(path) as conn:
+        conn.execute(
+            "UPDATE kanban_delivery_control SET producer_enabled=1, controller_id='controller-1' "
+            "WHERE singleton=1")
+        conn.execute("ALTER TABLE kanban_deliveries DROP COLUMN outcome")
+        conn.execute("ALTER TABLE kanban_deliveries DROP COLUMN outcome_reason")
+        conn.execute("ALTER TABLE kanban_deliveries DROP COLUMN outcome_at")
+        conn.execute("UPDATE kanban_delivery_control SET schema_version=2")
+    kb._INITIALIZED_PATHS.discard(str(path.resolve()))
+    with kbc.connect_closing(path) as conn:
+        assert conn.execute(
+            "SELECT schema_version, producer_enabled, controller_id FROM kanban_delivery_control"
+        ).fetchone()[:] == (3, 1, "controller-1")

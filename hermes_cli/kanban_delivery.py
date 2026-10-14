@@ -239,9 +239,11 @@ def completion_inbox_diagnostics(conn: sqlite3.Connection, *, now=None) -> dict:
     Distinct from :func:`producer_diagnostics`, which reports capture/rollout
     issues. This reports the live queue: pending age/count, active delivery
     leases, admitted-but-unprocessed deliveries, dead letters, and the last
-    success/error. It performs no writes and never requires capture.
+    success/error. It performs no writes and never requires capture. A board
+    without the delivery extension returns ``{"extension_installed": False}``.
     """
-    check_delivery_schema(conn, require_capture=False)
+    if not check_delivery_schema(conn, require_capture=False):
+        return {"extension_installed": False}
     now = int(time.time()) if now is None else int(now)
     states = dict(conn.execute(
         "SELECT state, COUNT(*) FROM kanban_deliveries GROUP BY state").fetchall())
@@ -258,11 +260,15 @@ def completion_inbox_diagnostics(conn: sqlite3.Connection, *, now=None) -> dict:
         "WHERE state='dead_letter' GROUP BY 1").fetchall())
     last_success = conn.execute(
         "SELECT MAX(acknowledged_at) FROM kanban_deliveries WHERE state='acknowledged'").fetchone()[0]
+    # There is no per-delivery error timestamp. Report the error code plus the
+    # creation time of the delivery that most recently recorded an error, so the
+    # field name matches the value instead of misreading it as the error time.
     last_error = conn.execute(
         "SELECT last_error_code, created_at FROM kanban_deliveries "
         "WHERE last_error_code IS NOT NULL AND state!='dead_letter' "
         "ORDER BY COALESCE(next_attempt_at, created_at) DESC LIMIT 1").fetchone()
     return {
+        "extension_installed": True,
         "pending": states.get("pending", 0),
         "pending_ready": pending_ready,
         "pending_oldest_age_seconds": (now - pending_oldest) if pending_oldest is not None else None,
@@ -277,43 +283,64 @@ def completion_inbox_diagnostics(conn: sqlite3.Connection, *, now=None) -> dict:
         "last_success_at": last_success,
         "last_success_age_seconds": (now - last_success) if last_success is not None else None,
         "last_error_code": last_error[0] if last_error else None,
-        "last_error_at": last_error[1] if last_error else None,
+        "last_error_created_at": last_error[1] if last_error else None,
     }
 
 
 def completion_inbox_repair_dry_run(conn: sqlite3.Connection) -> dict:
-    """Enumerate historical completion "misses" without mutating anything.
+    """Enumerate eligible repair candidates without mutating anything.
 
-    A miss is an actionable event that produced no durable delivery: it was
-    written before the producer was enabled, by an older writer, or its capture
-    failed. This is a dry run only: it reports candidates and never creates
-    deliveries, wakes sessions, or replays a turn. Actual replay is a later,
-    gated operation that selects individual current tasks.
+    An eligible miss matches the producer's own obligation: an actionable event
+    with ``delivery_expected=1`` and a bound task return route, with no durable
+    delivery for that event and route. Unroutable actionable events (no bound
+    route) are reported as a separate count and list, never merged into the
+    miss figure. This is a dry run only: it never creates deliveries, wakes
+    sessions, or replays a turn. A board without the delivery extension returns
+    a report with ``dry_run=True`` and ``extension_installed=False``.
     """
-    check_delivery_schema(conn, require_capture=False)
+    if not check_delivery_schema(conn, require_capture=False):
+        return {"dry_run": True, "extension_installed": False,
+                "miss_count": 0, "misses": [],
+                "unroutable_count": 0, "unroutable": []}
     placeholders = ",".join("?" for _ in ACTIONABLE_EVENT_KINDS)
-    rows = conn.execute(f"""
-        SELECT e.id, e.task_id, e.kind, e.created_at, e.delivery_expected,
-               t.return_route_id, t.status
-        FROM task_events e
-        JOIN tasks t ON t.id = e.task_id
-        LEFT JOIN kanban_deliveries d ON d.event_id = e.id
-        WHERE e.kind IN ({placeholders}) AND d.id IS NULL
-        ORDER BY e.id
-    """, ACTIONABLE_EVENT_KINDS).fetchall()
     misses = [
         {
             "event_id": row[0],
             "task_id": row[1],
             "kind": row[2],
             "created_at": row[3],
-            "delivery_expected": row[4],
-            "has_return_route": row[5] is not None,
-            "task_status": row[6],
+            "task_status": row[4],
         }
-        for row in rows
+        for row in conn.execute(f"""
+            SELECT e.id, e.task_id, e.kind, e.created_at, t.status
+            FROM task_events e
+            JOIN tasks t ON t.id = e.task_id
+            LEFT JOIN kanban_deliveries d ON d.event_id=e.id AND d.return_route_id=t.return_route_id
+            WHERE e.kind IN ({placeholders}) AND e.delivery_expected=1
+              AND t.return_route_id IS NOT NULL AND d.id IS NULL
+            ORDER BY e.id
+        """, ACTIONABLE_EVENT_KINDS).fetchall()
     ]
-    return {"dry_run": True, "miss_count": len(misses), "misses": misses}
+    unroutable = [
+        {
+            "event_id": row[0],
+            "task_id": row[1],
+            "kind": row[2],
+            "created_at": row[3],
+            "task_status": row[4],
+        }
+        for row in conn.execute(f"""
+            SELECT e.id, e.task_id, e.kind, e.created_at, t.status
+            FROM task_events e
+            JOIN tasks t ON t.id = e.task_id
+            WHERE e.kind IN ({placeholders}) AND e.delivery_expected=1
+              AND t.return_route_id IS NULL
+            ORDER BY e.id
+        """, ACTIONABLE_EVENT_KINDS).fetchall()
+    ]
+    return {"dry_run": True, "extension_installed": True,
+            "miss_count": len(misses), "misses": misses,
+            "unroutable_count": len(unroutable), "unroutable": unroutable}
 
 
 def gc_acknowledged_deliveries(conn: sqlite3.Connection, *, retention_days=None, now=None) -> int:
