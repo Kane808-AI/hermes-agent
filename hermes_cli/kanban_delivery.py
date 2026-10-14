@@ -233,6 +233,89 @@ def require_producer_ready(conn: sqlite3.Connection) -> None:
     check_delivery_schema(conn, require_capture=True)
 
 
+def completion_inbox_diagnostics(conn: sqlite3.Connection, *, now=None) -> dict:
+    """Read-only delivery-state rollup for the completion inbox.
+
+    Distinct from :func:`producer_diagnostics`, which reports capture/rollout
+    issues. This reports the live queue: pending age/count, active delivery
+    leases, admitted-but-unprocessed deliveries, dead letters, and the last
+    success/error. It performs no writes and never requires capture.
+    """
+    check_delivery_schema(conn, require_capture=False)
+    now = int(time.time()) if now is None else int(now)
+    states = dict(conn.execute(
+        "SELECT state, COUNT(*) FROM kanban_deliveries GROUP BY state").fetchall())
+    pending_oldest = conn.execute(
+        "SELECT MIN(created_at) FROM kanban_deliveries WHERE state='pending'").fetchone()[0]
+    pending_ready = conn.execute(
+        "SELECT COUNT(*) FROM kanban_deliveries WHERE state='pending' "
+        "AND (next_attempt_at IS NULL OR next_attempt_at<=?)", (now,)).fetchone()[0]
+    active_leases = conn.execute(
+        "SELECT COUNT(*) FROM kanban_deliveries WHERE lease_expires_at IS NOT NULL "
+        "AND lease_expires_at>?", (now,)).fetchone()[0]
+    dead_reasons = dict(conn.execute(
+        "SELECT COALESCE(last_error_code,'unknown'), COUNT(*) FROM kanban_deliveries "
+        "WHERE state='dead_letter' GROUP BY 1").fetchall())
+    last_success = conn.execute(
+        "SELECT MAX(acknowledged_at) FROM kanban_deliveries WHERE state='acknowledged'").fetchone()[0]
+    last_error = conn.execute(
+        "SELECT last_error_code, created_at FROM kanban_deliveries "
+        "WHERE last_error_code IS NOT NULL AND state!='dead_letter' "
+        "ORDER BY COALESCE(next_attempt_at, created_at) DESC LIMIT 1").fetchone()
+    return {
+        "pending": states.get("pending", 0),
+        "pending_ready": pending_ready,
+        "pending_oldest_age_seconds": (now - pending_oldest) if pending_oldest is not None else None,
+        "admitted_unprocessed": states.get("leased", 0) + states.get("transcript_admitted", 0),
+        "leased": states.get("leased", 0),
+        "transcript_admitted": states.get("transcript_admitted", 0),
+        "processed_unacknowledged": states.get("processed", 0),
+        "acknowledged": states.get("acknowledged", 0),
+        "dead_letter": states.get("dead_letter", 0),
+        "dead_letter_reasons": dead_reasons,
+        "active_leases": active_leases,
+        "last_success_at": last_success,
+        "last_success_age_seconds": (now - last_success) if last_success is not None else None,
+        "last_error_code": last_error[0] if last_error else None,
+        "last_error_at": last_error[1] if last_error else None,
+    }
+
+
+def completion_inbox_repair_dry_run(conn: sqlite3.Connection) -> dict:
+    """Enumerate historical completion "misses" without mutating anything.
+
+    A miss is an actionable event that produced no durable delivery: it was
+    written before the producer was enabled, by an older writer, or its capture
+    failed. This is a dry run only: it reports candidates and never creates
+    deliveries, wakes sessions, or replays a turn. Actual replay is a later,
+    gated operation that selects individual current tasks.
+    """
+    check_delivery_schema(conn, require_capture=False)
+    placeholders = ",".join("?" for _ in ACTIONABLE_EVENT_KINDS)
+    rows = conn.execute(f"""
+        SELECT e.id, e.task_id, e.kind, e.created_at, e.delivery_expected,
+               t.return_route_id, t.status
+        FROM task_events e
+        JOIN tasks t ON t.id = e.task_id
+        LEFT JOIN kanban_deliveries d ON d.event_id = e.id
+        WHERE e.kind IN ({placeholders}) AND d.id IS NULL
+        ORDER BY e.id
+    """, ACTIONABLE_EVENT_KINDS).fetchall()
+    misses = [
+        {
+            "event_id": row[0],
+            "task_id": row[1],
+            "kind": row[2],
+            "created_at": row[3],
+            "delivery_expected": row[4],
+            "has_return_route": row[5] is not None,
+            "task_status": row[6],
+        }
+        for row in rows
+    ]
+    return {"dry_run": True, "miss_count": len(misses), "misses": misses}
+
+
 def gc_acknowledged_deliveries(conn: sqlite3.Connection, *, retention_days=None, now=None) -> int:
     from hermes_cli.kanban_db import write_txn
 

@@ -8,7 +8,7 @@ import uuid
 
 from hermes_cli.sqlite_migration_backup import execute_ddl, migration_backup
 
-DELIVERY_SCHEMA_VERSION = 2
+DELIVERY_SCHEMA_VERSION = 3
 DELIVERY_WRITER_VERSION = 2
 ACTIONABLE_EVENT_KINDS = ("completed", "blocked", "gave_up", "review_requested", "changes_requested")
 
@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS kanban_deliveries (
     last_error_code TEXT,
     processed_at INTEGER,
     acknowledged_at INTEGER,
+    outcome TEXT CHECK(outcome IS NULL OR outcome IN
+        ('verified','followup_created','user_attention_required','dismissed_with_reason')),
+    outcome_reason TEXT,
+    outcome_at INTEGER,
     UNIQUE(board_uuid, event_id, return_route_id)
 );
 CREATE INDEX IF NOT EXISTS idx_kanban_deliveries_pending
@@ -139,7 +143,7 @@ def delivery_schema_version(conn: sqlite3.Connection) -> int:
     if not required <= columns:
         raise RuntimeError("incomplete Kanban delivery schema: control columns")
     rows = conn.execute("SELECT singleton,schema_version,min_writer_version FROM kanban_delivery_control").fetchall()
-    if len(rows) != 1 or rows[0][0] != 1 or rows[0][1] not in (1, DELIVERY_SCHEMA_VERSION) \
+    if len(rows) != 1 or rows[0][0] != 1 or not (1 <= rows[0][1] <= DELIVERY_SCHEMA_VERSION) \
             or rows[0][2] > DELIVERY_WRITER_VERSION:
         raise RuntimeError("incompatible Kanban delivery schema or writer version")
     return rows[0][1]
@@ -201,9 +205,20 @@ def prepare_delivery_migration(conn: sqlite3.Connection, path: Path) -> None:
     if version == DELIVERY_SCHEMA_VERSION:
         check_delivery_schema(conn)
     else:
-        if version == 1:
+        if version in (1, 2):
             _validate_capture_schema(conn, version)
         migration_backup(conn, path, f"kanban-delivery-v{DELIVERY_SCHEMA_VERSION if version else 1}")
+
+
+def _add_outcome_columns(conn: sqlite3.Connection) -> None:
+    """Add the Phase 7 consumer-outcome columns (idempotent)."""
+    from hermes_cli.sqlite_util import add_column_if_missing
+
+    add_column_if_missing(conn, "kanban_deliveries", "outcome",
+                          "outcome TEXT CHECK(outcome IS NULL OR outcome IN "
+                          "('verified','followup_created','user_attention_required','dismissed_with_reason'))")
+    add_column_if_missing(conn, "kanban_deliveries", "outcome_reason", "outcome_reason TEXT")
+    add_column_if_missing(conn, "kanban_deliveries", "outcome_at", "outcome_at INTEGER")
 
 
 def migrate_delivery_schema(conn: sqlite3.Connection) -> None:
@@ -225,8 +240,18 @@ def migrate_delivery_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TRIGGER kanban_task_route_immutable")
             conn.execute("DROP TRIGGER kanban_capture_delivery")
             execute_ddl(conn, DELIVERY_TRIGGERS)
+            _add_outcome_columns(conn)
             conn.execute("UPDATE kanban_delivery_control SET schema_version=?,min_writer_version=?,producer_enabled=0",
                          (DELIVERY_SCHEMA_VERSION, DELIVERY_WRITER_VERSION))
+            return
+        if version == 2:
+            _validate_capture_schema(conn, version)
+            _add_outcome_columns(conn)
+            # The capture trigger embeds DELIVERY_SCHEMA_VERSION; recreate it for v3.
+            conn.execute("DROP TRIGGER kanban_capture_delivery")
+            execute_ddl(conn, DELIVERY_TRIGGERS)
+            conn.execute("UPDATE kanban_delivery_control SET schema_version=? WHERE singleton=1",
+                         (DELIVERY_SCHEMA_VERSION,))
             return
         for table, name, ddl in (
             ("tasks", "return_route_id", "return_route_id TEXT"),

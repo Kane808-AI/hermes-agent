@@ -181,6 +181,6 @@ def test_reviewed_v1_upgrade_preserves_identity_and_obligations_but_requires_con
         assert schema.check_delivery_schema(conn, require_capture=True)
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             conn.execute("UPDATE tasks SET return_route_id=NULL WHERE id=?", (tid,))
-    backup = path.with_name("reviewed.db.before-kanban-delivery-v2.bak")
+    backup = path.with_name("reviewed.db.before-kanban-delivery-v3.bak")
     with contextlib.closing(sqlite3.connect(backup)) as snapshot:
         assert snapshot.execute("SELECT schema_version,producer_enabled FROM kanban_delivery_control").fetchone() == (1, 1)

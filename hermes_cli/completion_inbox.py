@@ -16,6 +16,8 @@ from hermes_state_kanban import assert_trusted_route_writer
 
 _BOARD_CONNECTION = ContextVar("completion_board_connection", default=None)
 
+OUTCOME_KINDS = ("verified", "followup_created", "user_attention_required", "dismissed_with_reason")
+
 
 def process_identity() -> tuple[int, int]:
     from gateway.status import get_process_start_time
@@ -385,6 +387,33 @@ class CompletionInbox:
                 raise RuntimeError("acknowledgement requires verified processing receipt")
             return self._delivery(delivery_id)
         return self._locked(acknowledge_on_conn)
+
+    def record_outcome(self, delivery_id: str, outcome: str, *, reason: str | None = None) -> dict:
+        """Durably record what Atlas did with a processed completion.
+
+        ``outcome`` is one of ``verified``, ``followup_created``,
+        ``user_attention_required``, or ``dismissed_with_reason``. A dismissal
+        requires a nonempty reason. Only a fenced owner with a committed
+        receipt may record an outcome; the write is an idempotent overwrite.
+        """
+        if outcome not in OUTCOME_KINDS:
+            raise ValueError(f"unknown completion outcome: {outcome!r}")
+        if outcome == "dismissed_with_reason" and (not isinstance(reason, str) or not reason.strip()):
+            raise ValueError("dismissed_with_reason requires a reason")
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 500):
+            raise ValueError("completion outcome reason must be bounded text")
+
+        def record_on_conn(conn, expires):
+            delivery = self._delivery(delivery_id)
+            if delivery["state"] not in {"processed", "acknowledged"}:
+                raise RuntimeError("completion outcome requires a processed delivery")
+            self._record(conn, delivery, receipt=True)
+            self.board.execute(
+                "UPDATE kanban_deliveries SET outcome=?, outcome_reason=?, outcome_at=? WHERE id=? AND state=?",
+                (outcome, reason, int(time.time()), delivery_id, delivery["state"]))
+            return self._delivery(delivery_id)
+
+        return self._locked(record_on_conn)
 
     def retry(self, delivery_id: str, error_code: str, *, delay_seconds: int):
         if not error_code or len(error_code) > 80 or delay_seconds < 0:
