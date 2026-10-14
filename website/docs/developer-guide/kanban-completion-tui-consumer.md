@@ -1,5 +1,38 @@
 # Kanban Completion TUI and Desktop Consumer (Phase 6)
 
+## Resume checkpoint (2026-10-14)
+
+Phase 5 is independently approved. Phase 6 implementation and verification are complete,
+but no independent Phase 6 approval has been recorded in this session. The next step is an
+independent review of Phase 6 before requesting authorization for the next phase.
+
+| Resume item | Saved value |
+| --- | --- |
+| Worktree | `/Users/chriskaneshiro/.hermes/hermes-agent/.worktrees/completion-inbox-phase01` |
+| Branch | `feat/completion-inbox-phase01` |
+| Approved Phase 5 base | `e26b6c58127956aa17d7bb280f924beb5c70a3a8` |
+| Phase 6 implementation | `126f1f990453a4685cfa89e00e086c04dcb6fdbe` |
+| Phase 6 verification receipt | `68b69fcaf528253e190b22a0d336957191a8cb3f` |
+
+The branch was clean at the receipt commit when this checkpoint was created. This checkpoint
+adds documentation only. Resume by checking the current branch, status, recent commits, and
+applicable `AGENTS.md` files, then review the implementation diff from the approved base and
+the evidence below. Preserve any work added after this checkpoint.
+
+There is no known Phase 6 implementation blocker. The shared spawn-refusal test failure below
+is reproduced on the approved base. Keep all producer and consumer defaults false. Do not
+activate, migrate live databases, restart services, change configuration, begin a later phase,
+modify AgentVault, push, or merge without new authorization.
+
+The commands, file manifest, results, and artifact hashes below are committed continuity
+records. Temporary archives, logs, and the test interpreter under `/private/tmp` may not survive
+cleanup. Verify their availability before reuse and reconstruct isolated snapshots from the
+saved Git revisions if needed. A future verification run must still use `scripts/run_tests.sh`.
+At this checkpoint, the Phase 6 evidence directory still exists, but the recorded temporary
+test interpreter is absent. Recreate an isolated test environment through the repository's
+package-management workflow before rerunning tests. The historical results below were not
+rerun for this documentation-only checkpoint.
+
 ## Status and scope
 
 Implementation: `126f1f990453a4685cfa89e00e086c04dcb6fdbe`.
