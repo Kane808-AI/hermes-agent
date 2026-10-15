@@ -2518,8 +2518,14 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     root is version-safe to propagate; ``hermes_cli.main``'s own bootstrap
     then owns dependency activation as usual. A resolved shim path owns its
     imports and is left alone. Same pin cron's external worker uses (#112729).
+
+    The check compares against ``_module_hermes_argv()`` instead of a literal
+    ``-m`` shape, so the argv and the pin cannot drift apart: adding ``-P`` to
+    the module argv once skipped this pin entirely and the child died with
+    ``No module named 'hermes_cli'``.
     """
-    if cmd[1:3] != ["-m", "hermes_cli.main"]:
+    module_argv = _module_hermes_argv()
+    if cmd[: len(module_argv)] != module_argv:
         return
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
 

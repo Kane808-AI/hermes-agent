@@ -1627,6 +1627,31 @@ def test_module_form_keeps_workspace_off_sys_path(tmp_path):
     assert str(repo_root / "hermes_cli") in proc.stdout, proc.stdout
 
 
+def test_module_form_pins_install_tree_on_pythonpath():
+    """The module-form worker must carry the install tree on ``PYTHONPATH``.
+
+    The pin's argv guard used to match a literal ``-m hermes_cli.main``: ``-P``
+    moves that flag, so the guard silently skipped the pin and the child died
+    with ``No module named 'hermes_cli'`` instead of booting.
+    """
+    import os
+    from pathlib import Path
+
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    repo_root = Path(kbd.__file__).resolve().parents[1]
+    module_argv = kbd._module_hermes_argv()
+
+    env: dict[str, str] = {}
+    kbd._propagate_module_import_root([*module_argv, "-p", "builder", "chat", "-q", "x"], env)
+    assert str(repo_root) in env.get("PYTHONPATH", "").split(os.pathsep), env
+
+    # A resolved shim owns its own imports: nothing to pin.
+    shim_env: dict[str, str] = {}
+    kbd._propagate_module_import_root(["/opt/hermes/bin/hermes", "-p", "builder"], shim_env)
+    assert shim_env == {}
+
+
 
 
 def test_resolve_hermes_argv_module_actually_runs():
