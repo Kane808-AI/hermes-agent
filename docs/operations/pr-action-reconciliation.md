@@ -3,6 +3,8 @@
 The optional `external_action_guard.enabled: true` profile setting adds a durable
 reconciliation gate immediately before the existing authorized tool dispatcher.
 It does not grant action permission, replace approvals, or select a model.
+The registered default is disabled; normal `hermes config set
+external_action_guard.enabled true` opts the selected profile in.
 
 ## Supported actions
 
@@ -18,6 +20,12 @@ Hermes root. A successful matching GitHub PR URL becomes a reusable receipt. An
 exception, timeout or unrecognized result leaves an uncertain/inflight record;
 repeating that identity is blocked pending reconciliation. Reads, ordinary coding,
 tests and unrelated actions continue normally.
+
+MCP receipts accept the handler's one-level `result`/`structuredContent` envelope,
+including a JSON text block. The PR number and repository URL must agree; errors,
+conflicting receipts and arbitrary nested data do not settle the reservation.
+Installing a corrected parser does not clear existing uncertain records. Reconcile
+those against external evidence using the procedure below.
 
 Shell wrappers/aliases, arbitrary MCP servers, deployments and messages are outside
 coverage. Shell compounds and expansions in a recognized PR command are rejected.

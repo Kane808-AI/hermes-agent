@@ -69,23 +69,61 @@ def identify(name, args):
     return {'kind':'github_pr_create', 'repo':values['repo'].lower(), 'head':values['head'], 'base':values['base']}
 
 
-def receipt(result, identity):
-    """Only a matching GitHub PR URL plus an unambiguous success envelope settles."""
+def _result_object(result):
     try:
         data = json.loads(result) if isinstance(result, str) else result
     except (TypeError, ValueError):
         return None
-    if not isinstance(data, dict) or data.get('error') or data.get('success') is False:
+    if not isinstance(data, dict) or data.get('error') or data.get('success') is False or data.get('isError') or data.get('is_error'):
+        return None
+    return data
+
+
+def _pr_object_url(data, identity):
+    """A structured create result must agree on repository, number and URL."""
+    data = _result_object(data)
+    if data is None or type(data.get('number')) is not int or data['number'] < 1:
+        return None
+    url = data.get('html_url')
+    if not isinstance(url, str):
+        return None
+    match = re.fullmatch(r'https://github\.com/([^/\s]+/[^/\s]+)/pull/([1-9][0-9]*)', url)
+    if match and match[1].lower() == identity['repo'] and int(match[2]) == data['number']:
+        return url
+    return None
+
+
+def _mcp_receipt(data, identity):
+    """Unwrap only the real renderer's one-level result/structuredContent envelope."""
+    if 'structuredContent' not in data:
+        return _pr_object_url(data.get('result', data), identity)
+    url = _pr_object_url(data['structuredContent'], identity)
+    if url is None:
+        return None
+    # Prose alongside structured content is normal. A second JSON object must agree;
+    # never choose one of conflicting receipts or recursively hunt through nested data.
+    other = data.get('result')
+    if isinstance(other, str):
+        try:
+            other = json.loads(other)
+        except ValueError:
+            return url
+    if other is not None and _pr_object_url(other, identity) != url:
+        return None
+    return url
+
+
+def receipt(result, identity):
+    """Only a matching GitHub PR URL plus an unambiguous success envelope settles."""
+    data = _result_object(result)
+    if data is None:
         return None
     if 'exit_code' in data:
         if type(data['exit_code']) is not int or data['exit_code'] != 0:
             return None
         text = str(data.get('output', ''))
     else:
-        # Standard GitHub create-PR response. A bare model assertion is not a receipt.
-        if not data.get('number') or not data.get('html_url'):
-            return None
-        text = str(data['html_url'])
+        return _mcp_receipt(data, identity)
     match = re.search(r'https://github\.com/([^/\s]+/[^/\s]+)/pull/([1-9][0-9]*)(?:\s|$)', text)
     if match and match[1].lower() == identity['repo']:
         return f'https://github.com/{match[1]}/pull/{match[2]}'
