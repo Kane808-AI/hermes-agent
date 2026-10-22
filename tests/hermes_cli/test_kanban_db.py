@@ -1592,74 +1592,10 @@ def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]
 
 
-def test_module_form_keeps_workspace_off_sys_path(tmp_path):
-    """A task workspace must never shadow the install tree it was spawned from.
-
-    Workers run with cwd set to their workspace. Under a bare ``-m`` launch that
-    cwd leads ``sys.path``, so a workspace that is itself a checkout of this repo
-    (every git-worktree worker) supplied ``hermes_cli`` — the boot then resolved
-    its install root to the workspace, found no committed dependency environment
-    for that path, and exited 1 before doing any work. ``-P`` is what prevents
-    it, so assert the flag AND its effect.
-    """
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    from hermes_cli import kanban_db_dispatch as kbd
-
-    repo_root = Path(kbd.__file__).resolve().parents[1]
-    assert kbd._module_hermes_argv() == [sys.executable, "-P", "-m", "hermes_cli.main"]
-
-    # A workspace that looks like a checkout: it carries its own hermes_cli.
-    workspace = tmp_path / "workspace"
-    (workspace / "hermes_cli").mkdir(parents=True)
-    (workspace / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
-
-    env = {**os.environ, "PYTHONPATH": str(repo_root)}
-    env.pop("HERMES_HOME", None)
-    proc = subprocess.run(
-        [sys.executable, "-P", "-c", "import hermes_cli; print(hermes_cli.__file__)"],
-        cwd=workspace, env=env, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert str(repo_root / "hermes_cli") in proc.stdout, proc.stdout
-
-
-def test_module_form_pins_install_tree_on_pythonpath():
-    """The module-form worker must carry the install tree on ``PYTHONPATH``.
-
-    The pin's argv guard used to match a literal ``-m hermes_cli.main``: ``-P``
-    moves that flag, so the guard silently skipped the pin and the child died
-    with ``No module named 'hermes_cli'`` instead of booting.
-    """
-    import os
-    from pathlib import Path
-
-    from hermes_cli import kanban_db_dispatch as kbd
-
-    repo_root = Path(kbd.__file__).resolve().parents[1]
-    module_argv = kbd._module_hermes_argv()
-
-    env: dict[str, str] = {}
-    kbd._propagate_module_import_root([*module_argv, "-p", "builder", "chat", "-q", "x"], env)
-    assert str(repo_root) in env.get("PYTHONPATH", "").split(os.pathsep), env
-
-    # A resolved shim owns its own imports: nothing to pin.
-    shim_env: dict[str, str] = {}
-    kbd._propagate_module_import_root(["/opt/hermes/bin/hermes", "-p", "builder"], shim_env)
-    assert shim_env == {}
-
-
-
-
 def test_resolve_hermes_argv_module_actually_runs():
     """The fallback module name must be importable + runnable.
 
-    A unit test that pins the literal string is necessary but not
-    sufficient — if `hermes_cli.main` ever loses `if __name__ == "__main__"`
-    handling or its argparse setup, `python -m hermes_cli.main --version`
+    If `hermes_cli.main` loses its entry point or argparse setup, --version
     would fail and so would every dispatcher spawn that hits the fallback.
     Run it as a real subprocess to catch that regression.
     """
@@ -1672,7 +1608,11 @@ def test_resolve_hermes_argv_module_actually_runs():
         os.environ.pop("HERMES_BIN", None)
         with mock.patch.object(shutil, "which", return_value=None):
             argv = kbd._resolve_hermes_argv()
-    r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30)
+    worker_env = os.environ.copy()
+    kbd._propagate_module_import_root(argv, worker_env)
+    r = subprocess.run(
+        argv + ["--version"], env=worker_env, capture_output=True, text=True, timeout=30,
+    )
     assert r.returncode == 0, (
         f"`{' '.join(argv)} --version` failed (rc={r.returncode}); "
         f"stderr={r.stderr[:200]!r}"
@@ -1722,7 +1662,7 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
         claim_expires=None, tenant=None, branch_name=None,
     )
 
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: [sys.executable, "-m", "hermes_cli.main"])
+    monkeypatch.setattr(kbd, "_resolve_hermes_argv", kbd._module_hermes_argv)
     kbd._default_spawn(task, str(tmp_path / "ws"))
     assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 

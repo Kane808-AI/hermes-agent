@@ -2490,19 +2490,7 @@ def _rotate_worker_log(
 
 
 def _module_hermes_argv() -> list[str]:
-    """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package).
-
-    ``-P`` keeps the task workspace off ``sys.path``. Workers spawn with their
-    cwd set to the task workspace, and a bare ``-m`` launch prepends that cwd to
-    ``sys.path``, so a workspace that is itself a checkout of this repo (every
-    git-worktree worker) shadowed the install tree the parent had just pinned on
-    ``PYTHONPATH``. The child then resolved its install root to the workspace,
-    found no committed dependency environment for that path, and exited 1 with
-    "no dependency environment is committed for this install" before doing any
-    work — charging a crash to the card. A workspace is a working directory,
-    never an import root.
-    """
+    """Launch this install; -P prevents the task workspace shadowing PYTHONPATH."""
     return [sys.executable, "-P", "-m", "hermes_cli.main"]
 
 
@@ -2518,11 +2506,6 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     root is version-safe to propagate; ``hermes_cli.main``'s own bootstrap
     then owns dependency activation as usual. A resolved shim path owns its
     imports and is left alone. Same pin cron's external worker uses (#112729).
-
-    The check compares against ``_module_hermes_argv()`` instead of a literal
-    ``-m`` shape, so the argv and the pin cannot drift apart: adding ``-P`` to
-    the module argv once skipped this pin entirely and the child died with
-    ``No module named 'hermes_cli'``.
     """
     module_argv = _module_hermes_argv()
     if cmd[: len(module_argv)] != module_argv:
