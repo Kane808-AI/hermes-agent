@@ -108,7 +108,14 @@ def test_gateway_flag_is_supported_but_later_consumers_remain_refused():
 
 @pytest.mark.parametrize(
     ("surface", "source"),
-    [("cli", "cli"), ("tui", "tui"), ("desktop", "desktop")],
+    [
+        ("cli", "cli"),
+        ("tui", "tui"),
+        ("desktop", "desktop"),
+        # Telegram is an interactive Atlas route, not a worker source.  It must
+        # claim through the same identity-bound consumer fence as the local UIs.
+        ("telegram", "telegram"),
+    ],
 )
 def test_gateway_claim_derives_each_eligible_route_tip_from_the_profile(
     tmp_path, monkeypatch, surface, source
