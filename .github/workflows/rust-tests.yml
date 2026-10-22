@@ -30,8 +30,9 @@ jobs:
     # cargo builds codegen units and test binaries in parallel across the
     # cores. This lane also builds the crate from the start when Cargo.toml
     # changes.
-    runs-on: ubuntu-latest-32-core
-    timeout-minutes: 30
+    # This fork uses standard runners; upstream keeps its provisioned labels.
+    runs-on: ${{ github.repository == 'Kane808-AI/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
+    timeout-minutes: ${{ github.repository == 'Kane808-AI/hermes-agent' && 120 || 30 }}
     defaults:
       run:
         working-directory: apps/bootstrap-installer/src-tauri

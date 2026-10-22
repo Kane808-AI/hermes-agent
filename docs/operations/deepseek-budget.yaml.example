@@ -1,0 +1,9 @@
+# Example only. Not installed; no credentials or spending authority are supplied.
+enabled: false
+# Omit mode to retain enforcement. Select accounting_only only in an approved rollout.
+mode: enforce
+credential_accounts: {}
+# When enabled, populate verified SHA256 credential fingerprints and non-secret labels.
+# Never put API keys or production account identifiers into this example.
+# Enforcement: fixed USD 10/day allocation, USD 8 warning, America/Los_Angeles.
+# Accounting-only: no custom monetary/expiry admission gate; USD 8 is informational.

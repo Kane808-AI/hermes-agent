@@ -436,6 +436,8 @@ def _new_sdk_client(sdk, kwargs: dict[str, Any], headers: dict[str, str], route:
     merged.update(_custom_provider_extra_headers(route or kwargs.get("base_url")))
     if merged:
         kwargs["default_headers"] = merged
+    from agent.deepseek_budget_http import reject_uncovered_anthropic_route
+    reject_uncovered_anthropic_route(route or kwargs.get("base_url"))
     return sdk.Anthropic(**kwargs)
 
 

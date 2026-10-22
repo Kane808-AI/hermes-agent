@@ -48,8 +48,8 @@ jobs:
                 continue ;;
             esac
 
-            if echo "$email" | grep -qP '\+.*@users\.noreply\.github\.com'; then
-              continue  # GitHub id+login noreply emails auto-resolve
+            if echo "$email" | grep -Eq '^([0-9]+\+)?[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?@users\.noreply\.github\.com$'; then
+              continue  # Both documented GitHub noreply forms auto-resolve; no mapping fabricated.
             fi
 
             if [ -f "contributors/emails/${email}" ]; then

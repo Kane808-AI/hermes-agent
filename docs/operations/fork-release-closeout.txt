@@ -1,0 +1,102 @@
+Fork release and deployment closeout
+===================================
+
+Scope
+-----
+This is an operator checklist, not automatic enforcement or permission to
+publish, change access, run paid services, merge, or restart. Atlas coordinates
+the release record. Every executor, including dot/Codex and Builder, must
+supply the same evidence. Atlas must distinguish prepared, remotely backed up,
+CI-verified, merged, deployed, and rollback-verified states.
+
+The fork's normal PR lanes use standard GitHub-hosted runners. Linux retains
+both test slices with four workers each. Native macOS slices and Windows x64
+and ARM64 remain present; OS tests use three workers. JS check units run one
+at a time through the existing discovery runner. Rust and Nix use the host's
+standard CPU count. Fork jobs have a bounded 120-minute timeout; a timeout is
+a failure, never an excuse to omit coverage. Upstream runner choices are
+unchanged. GitHub documents windows-11-arm as a standard public-repository
+runner: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+
+Only PR execution has been prepared here. Manual CI dispatch selects all
+lanes, including E2E jobs that still request larger runners. Do not dispatch
+that workflow manually under a PR-only approval. Workflow-file changes make
+the existing classifier select all ordinary PR lanes; the new runner choices
+cover that case, including JS, Rust and Nix. Do not alter the classifier to
+hide inconvenient tests. Remote native-host execution is still required.
+
+Before publication
+------------------
+[ ] Name the release coordinator and executor; record the task authorization.
+[ ] Record repository, base SHA, full candidate SHA, branch and exact outgoing
+    range. Review EVERY outgoing commit, including rescued local commits.
+[ ] Preserve authorship and record source/cherry-pick mapping for older fixes.
+[ ] Capture a SHA256 manifest of intended deployed source and current local
+    changes. Keep unrelated stashes separate; do not blanket-apply them.
+[ ] Review secrets, personal/operational data, licenses and security disclosure
+    implications across the whole outgoing history, not only its final diff.
+[ ] Run focused tests plus required checks; retain commands, tool/dependency
+    versions, logs, skipped tests, failures and scope limitations. Test in an
+    isolated home with network and paid-provider access blocked when offline.
+[ ] Separate runtime/configuration/state backups from source history. Review
+    their backup destination/access and restore procedure independently. Never
+    commit credentials, live ledgers, transcripts or private project files.
+
+Before CI and merge
+-------------------
+[ ] Record per-workflow state AND repository/fork-level Actions state. An API
+    state of active is not proof the fork-level suspension has been lifted.
+[ ] Obtain separate approval for the exact workflow enable/disable list and
+    trigger. Keep schedules, release/publish, live-provider and unrelated
+    dispatch workflows disabled. Do not use a broad re-enable button without
+    verifying its effect and preserving those exclusions.
+[ ] Recheck that the current PR head is the approved candidate before starting
+    a PR event. Enabling a workflow is not evidence that CI ran.
+[ ] Save run/check URLs, event, head SHA and tested merge SHA. Require successful
+    applicable jobs, including native Windows ARM; do not count an empty,
+    cancelled, queued, skipped-required or timed-out run as a pass.
+[ ] Verify remote branch SHA after publication. Record PR URL and review result.
+    A local commit, stash, or backup folder is not a verified remote backup.
+[ ] Recheck base drift and merge contents. Obtain merge/deployment authorization
+    separately. A changed candidate requires renewed exact-SHA test evidence.
+
+Before and after deployment
+---------------------------
+[ ] Verify the gateway and workers are idle; do not interrupt user sessions.
+[ ] Record current live HEAD, dirty-file hashes, profiles/config hashes and
+    supervisor identity. Refuse to overwrite concurrent changes.
+[ ] Retain a recoverable snapshot of the current source plus explicitly scoped
+    local configuration/state. Record its location privately and test recovery
+    in isolation. SQLite backup must be consistent; do not copy a live WAL DB
+    as an ordinary standalone file or reset/reconcile its records implicitly.
+[ ] Deploy only the reviewed source commit. Keep configuration, credentials,
+    billing, schedules and unrelated overlays separate. Preserve necessary
+    install metadata/dependencies; do not use an indiscriminate git clean.
+[ ] Require tracked live source to be clean and match the intended commit.
+    Any remaining untracked custom source is an unresolved closeout item.
+[ ] Restart only with authorization, once idle, through the actual supervisor.
+    Verify a fresh process, connection health, loaded source/configuration,
+    and routing through non-billable checks. Report stale TUI sessions.
+[ ] Compare deployed file hashes to candidate manifest and remote commit;
+    record intentional local configuration differences without their secrets.
+[ ] If health fails, use the preserved prior source/configuration and the same
+    supervisor, verify rollback health, and report failure. Never erase newer
+    ledger entries or uncertain-action records during rollback.
+
+Receipt fields
+--------------
+Coordinator; executor; authorization references; status; repository/branch;
+base SHA; candidate SHA; merge/deployed SHA; source SHA256 manifest; local
+configuration hash manifest location; original/cherry-picked commit mapping;
+test command/log/hash/skip evidence; remote SHA readback and timestamp; PR and
+CI URLs with tested SHAs; review/merge evidence; prior live state; backup and
+rollback locations; idle check; restart/process/connection checks; post-deploy
+hash verification; unresolved limitations and assigned follow-up owner.
+
+Update discipline
+-----------------
+Start the next update only after source closeout is clean and remotely
+verified. Fetch/review upstream changes in an isolated checkout and test their
+integration with the fork before changing the live installation. Fork
+divergence alone is not a failure and does not authorize an upstream merge.
+Atlas tracks completion; dot deployments are not exempt from any step above.

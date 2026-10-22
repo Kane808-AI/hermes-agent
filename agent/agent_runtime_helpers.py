@@ -1923,20 +1923,8 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
 
 
 def _profile_for_base_url(base_url: str) -> Any | None:
-    """Registered profile whose own base_url is a prefix of ``base_url`` (provider name did not
-    resolve). Prefix, not equality: the replaced copilot-acp branch keyed on
-    ``startswith("acp://copilot")``, so a path or user override under the same root must resolve."""
-    try:
-        from providers import list_providers
-        candidates = list_providers()
-    except Exception:
-        return None
-    target = base_url.rstrip("/").lower()
-    for candidate in candidates or []:
-        own = str(getattr(candidate, "base_url", "") or "").rstrip("/").lower()
-        if own and (target == own or target.startswith(own + "/")):
-            return candidate
-    return None
+    from agent.client_lifecycle import _profile_for_base_url as resolve
+    return resolve(base_url)
 
 
 def _ensure_copilot_headers(client_kwargs: dict) -> None:
@@ -2088,6 +2076,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     )
     # ``process_bootstrap.OpenAI`` is a lazy SDK proxy; resolved at call time so tests can patch it.
     from agent import process_bootstrap
+    from agent.deepseek_budget_http import guard_client_kwargs
+    guard_client_kwargs(client_kwargs)
     client = process_bootstrap.OpenAI(**client_kwargs)
     # Routing proxies name the deployment they served in a response header (#54864).
     from agent.served_model import install_served_model_capture

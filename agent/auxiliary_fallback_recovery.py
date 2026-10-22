@@ -48,3 +48,39 @@ async def send_with_parameter_rungs_async(
     except Exception as first_err:
         ladder = _parameter_ladder(first_err, client, kwargs, task=task, tag=" (async)")
         return await _drive_ladder_async(ladder, lambda step: send(*step.args))
+
+
+def _drive_ladder(ladder, perform: Callable[[Any], Any]) -> Any:
+    """Run a ladder generator, feeding each step's result (or exception) back in."""
+    try:
+        step = next(ladder)
+        while True:
+            try:
+                result = perform(step)
+            except Exception as exc:  # health: allow BLE001 -- forwards arbitrary provider errors via ladder.throw; budget denials re-raise
+                from agent.deepseek_budget_policy import budget_denial
+                if denied := budget_denial(exc):
+                    raise denied
+                step = ladder.throw(exc)
+            else:
+                step = ladder.send(result)
+    except StopIteration as stop:
+        return stop.value
+
+
+async def _drive_ladder_async(ladder, perform: Callable[[Any], Any]) -> Any:
+    """Async twin of :func:`_drive_ladder` (``perform`` is awaited)."""
+    try:
+        step = next(ladder)
+        while True:
+            try:
+                result = await perform(step)
+            except Exception as exc:  # health: allow BLE001 -- forwards arbitrary provider errors via ladder.throw; budget denials re-raise
+                from agent.deepseek_budget_policy import budget_denial
+                if denied := budget_denial(exc):
+                    raise denied
+                step = ladder.throw(exc)
+            else:
+                step = ladder.send(result)
+    except StopIteration as stop:
+        return stop.value

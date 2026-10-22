@@ -2490,9 +2490,8 @@ def _rotate_worker_log(
 
 
 def _module_hermes_argv() -> list[str]:
-    """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
-    return [sys.executable, "-m", "hermes_cli.main"]
+    """Launch this install; -P prevents the task workspace shadowing PYTHONPATH."""
+    return [sys.executable, "-P", "-m", "hermes_cli.main"]
 
 
 def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
@@ -2508,7 +2507,8 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     then owns dependency activation as usual. A resolved shim path owns its
     imports and is left alone. Same pin cron's external worker uses (#112729).
     """
-    if cmd[1:3] != ["-m", "hermes_cli.main"]:
+    module_argv = _module_hermes_argv()
+    if cmd[: len(module_argv)] != module_argv:
         return
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
 
