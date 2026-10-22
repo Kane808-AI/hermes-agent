@@ -72,8 +72,8 @@ concurrency:
 jobs:
   os-tests:
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout || 30 }}
+    runs-on: ${{ github.repository == 'Kane808-AI/hermes-agent' && (matrix.runner == 'windows-latest-32-arm-core' && 'windows-11-arm' || matrix.runner == 'windows-latest-32-core' && 'windows-latest' || matrix.runner) || matrix.runner }}
+    timeout-minutes: ${{ github.repository == 'Kane808-AI/hermes-agent' && 120 || matrix.timeout || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -187,7 +187,7 @@ jobs:
         env:
           # These files spawn nested PowerShell trees. CPU-count parallelism
           # starves cold child startup before the fixture's idle deadline.
-          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}
+          HERMES_TEST_WORKERS: ${{ github.repository == 'Kane808-AI/hermes-agent' && '3' || matrix.marker == 'windows' && '16' || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
