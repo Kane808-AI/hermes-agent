@@ -193,6 +193,8 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # SDK-internal retries by default and let Hermes control the budget; explicit callers can still override
     # via kwargs.
     kwargs.setdefault("max_retries", 0)
+    from agent.deepseek_budget_http import guard_client_kwargs
+    guard_client_kwargs(kwargs)
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
 
 
@@ -3337,6 +3339,9 @@ def _is_transient_transport_error(exc: Exception) -> bool:
 
     Deliberately narrow: payment/auth/rate-limit errors switch provider, refresh creds, or rotate the pool.
     """
+    from agent.deepseek_budget_policy import budget_denial
+    if budget_denial(exc):
+        return False
     if _is_connection_error(exc):
         return True
     status = _exc_http_status(exc)
@@ -4756,6 +4761,8 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # Hermes owns the auxiliary retry/timeout budget; disable SDK-internal retries.
     # See #54465.
     async_kwargs.setdefault("max_retries", 0)
+    from agent.deepseek_budget_http import guard_client_kwargs
+    guard_client_kwargs(async_kwargs)
     return AsyncOpenAI(**async_kwargs), model
 
 
@@ -7961,6 +7968,9 @@ def _aux_recovery_ladder(
     strips → Nous heal/refresh → credential refresh/pool rotation → provider fallback.
     Each rung returns a response, narrows ``first_err`` and falls through, or re-raises.
     Raises the narrowed ``first_err`` when exhausted (after evicting a connection-poisoned client)."""
+    from agent.deepseek_budget_policy import budget_denial
+    if denied := budget_denial(first_err):
+        raise denied
     tag = " (async)" if async_mode else ""
     route = _LadderRoute(
         client, task, tag, async_mode, base_info, resolved_provider, resolved_model,
@@ -7999,33 +8009,13 @@ def _aux_recovery_ladder(
 
 
 def _drive_ladder(ladder, perform: Callable[[_LadderStep], Any]) -> Any:
-    """Run a ladder generator, feeding each step's result (or exception) back in."""
-    try:
-        step = next(ladder)
-        while True:
-            try:
-                result = perform(step)
-            except Exception as exc:
-                step = ladder.throw(exc)
-            else:
-                step = ladder.send(result)
-    except StopIteration as stop:
-        return stop.value
+    from agent.auxiliary_fallback_recovery import _drive_ladder as run
+    return run(ladder, perform)
 
 
 async def _drive_ladder_async(ladder, perform: Callable[[_LadderStep], Any]) -> Any:
-    """Async twin of :func:`_drive_ladder` (``perform`` is awaited)."""
-    try:
-        step = next(ladder)
-        while True:
-            try:
-                result = await perform(step)
-            except Exception as exc:
-                step = ladder.throw(exc)
-            else:
-                step = ladder.send(result)
-    except StopIteration as stop:
-        return stop.value
+    from agent.auxiliary_fallback_recovery import _drive_ladder_async as run
+    return await run(ladder, perform)
 
 
 def _elapsed_ms(started_at: float, now: Optional[float] = None) -> int:

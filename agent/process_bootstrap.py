@@ -265,7 +265,7 @@ def close_shared_transports() -> int:
     return len(transports)
 
 
-def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True) -> Optional[Any]:
+def _build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True) -> Optional[Any]:
     """httpx client for OpenAI SDK calls with env-only proxy policy (None on failure).
 
     Explicit no-proxy mounts disable httpx's ``trust_env`` path so macOS system
@@ -322,6 +322,13 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
         return client_cls(limits=limits, timeout=timeout, proxy=proxy, mounts=mounts or None, verify=verify)
     except Exception:
         return None
+
+
+def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True) -> Optional[Any]:
+    """Build then enforce outside the best-effort builder: never fail open to SDK defaults."""
+    client = _build_keepalive_http_client(base_url, async_mode=async_mode, verify=verify)
+    from agent.deepseek_budget_http import install_guard
+    return install_guard(client)
 
 
 def _install_safe_stdio() -> None:

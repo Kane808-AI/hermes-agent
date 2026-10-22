@@ -100,6 +100,24 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
         agent._replace_primary_openai_client(reason="fallback_timeout_apply")
 
 
+
+def _profile_for_base_url(base_url: str) -> Any | None:
+    """Registered profile whose own base_url is a prefix of ``base_url`` (provider name did not
+    resolve). Prefix, not equality: the replaced copilot-acp branch keyed on
+    ``startswith("acp://copilot")``, so a path or user override under the same root must resolve."""
+    try:
+        from providers import list_providers
+        candidates = list_providers()
+    except Exception:  # health: allow BLE001 -- preserve optional provider-registry fallback when lookup fails
+        return None
+    target = base_url.rstrip("/").lower()
+    for candidate in candidates or []:
+        own = str(getattr(candidate, "base_url", "") or "").rstrip("/").lower()
+        if own and (target == own or target.startswith(own + "/")):
+            return candidate
+    return None
+
+
 class ClientLifecycleMixin:
     def _close_task_resources(self, task_id: str) -> None:
         """Release task resources without treating a shared environment as process ownership."""

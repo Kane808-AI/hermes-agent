@@ -749,7 +749,9 @@ def _dispatch_authorized_once(
     from agent.terminal_approval_batch import prepare_current_terminal
     prepare_current_terminal(ref)
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
-    return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+    from agent.external_action_guard import guarded_execute
+    return _run_with_activity_heartbeat(
+        agent, ref.name, lambda: guarded_execute(ref.name, ref.args, execute))
 
 
 def _run_agent_tool_execution_middleware(
