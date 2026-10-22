@@ -1113,6 +1113,9 @@ def _handle_create(args: dict, **kw) -> str:
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
+    from hermes_cli.kanban_origin import trusted_interactive_origin
+
+    interactive_origin = trusted_interactive_origin(kw.get("parent_agent"))
     with _board(args.get("board")) as (kb, conn):
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
@@ -1123,30 +1126,47 @@ def _handle_create(args: dict, **kw) -> str:
         # The ambient id is the request-scoped ContextVar binding, not the process-global
         # os.environ: in a multi-session gateway the env holds the LAST agent built, and an
         # id that never reached its ``sessions`` row is provenance pointing at nothing.
-        session_id = (_persisted_session_id(args.get("session_id"))
-                      or (self_task.session_id if self_task else None)
-                      or _persisted_session_id(_current_origin_session_id())
-                      or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
+        session_id = (
+            interactive_origin.session_id if interactive_origin is not None else
+            (_persisted_session_id(args.get("session_id"))
+             or (self_task.session_id if self_task else None)
+             or _persisted_session_id(_current_origin_session_id())
+             or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
+        )
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
-        new_tid = kb.create_task(
-            conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
-            parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
-            priority=_opt_int(args.get("priority"), 0),
-            workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
-            # Board-project inheritance must read the board this call opened, not the
-            # session's current board.
-            board=args.get("board"),
-            project_source_task_id=project_source_task_id, triage=triage,
-            creator_task_id=self_tid,
-            idempotency_key=args.get("idempotency_key"),
-            max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            model_override=model_override, provider_override=provider_override,
-            goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
-            completion_contract=args.get("completion_contract"),
-            initial_status=str(args.get("initial_status") or "running"),
-            created_by=_persisted_identity(), session_id=session_id)
+        def create_task() -> str:
+            return kb.create_task(
+                conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
+                parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
+                priority=_opt_int(args.get("priority"), 0),
+                workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
+                # Board-project inheritance must read the board this call opened, not the
+                # session's current board.
+                board=args.get("board"),
+                project_source_task_id=project_source_task_id, triage=triage,
+                creator_task_id=self_tid,
+                idempotency_key=args.get("idempotency_key"),
+                max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
+                model_override=model_override, provider_override=provider_override,
+                goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+                completion_contract=args.get("completion_contract"),
+                initial_status=str(args.get("initial_status") or "running"),
+                created_by=_persisted_identity(), session_id=session_id)
+
+        if interactive_origin is None:
+            new_tid = create_task()
+        else:
+            from hermes_cli.kanban_origin import create_task_with_interactive_origin
+
+            new_tid = create_task_with_interactive_origin(
+                interactive_origin,
+                conn,
+                parents=tuple(parents),
+                creator_task_id=self_tid,
+                create_task=create_task,
+            )
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}

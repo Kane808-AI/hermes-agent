@@ -322,6 +322,8 @@ def admit_durable_turn_lease(
         f"pid={os.getpid()}{holder_namespace_token()}:turn={relay_turn_id}"
         f":platform={task_context['platform'] or 'unknown'}"
     )
+    from agent.completion_inbox_execution import completion_attempt_holder
+    holder = completion_attempt_holder(holder)
     reload_needed = announced = False
 
     def _on_contended() -> None:

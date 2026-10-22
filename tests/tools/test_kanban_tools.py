@@ -9,6 +9,7 @@ Verifies:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -1167,9 +1168,8 @@ def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):
     assert subs[0]["delivery_mode"] == "notify"
 
 
-def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
-    """CLI / cron / test sessions have no persistent delivery channel.
-    _maybe_auto_subscribe returns False and no row is written."""
+def test_create_without_interactive_origin_does_not_subscribe(monkeypatch, worker_env):
+    """No persisted interactive origin is present. This does not describe a live CLI."""
     from tools import kanban_tools as kt
     monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
     monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
@@ -1185,6 +1185,36 @@ def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
     assert d["subscribed"] is False, d
 
     assert _list_subs_for_task(d["task_id"]) == []
+
+
+def test_create_from_interactive_cli_records_opaque_return_route(monkeypatch, worker_env):
+    import contextlib
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    for key in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_SESSION_KEY",
+                "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", "interactive-cli")
+    with contextlib.closing(SessionDB(get_hermes_home() / "state.db")) as state:
+        state.create_session("interactive-cli", source="cli")
+        agent = SimpleNamespace(
+            _session_db=state,
+            platform="cli",
+            session_id="interactive-cli",
+            side_agent=False,
+        )
+        result = json.loads(kt._handle_create(
+            {"title": "return to CLI", "assignee": "peer"},
+            parent_agent=agent,
+        ))
+    assert result["ok"], result
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, result["task_id"])
+        assert task.return_route_id
+        assert task.origin_interactive
 
 
 def test_create_tui_subscription_binds_to_live_session_after_compaction_fork(monkeypatch, worker_env, tmp_path):

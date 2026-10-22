@@ -76,8 +76,8 @@ _STREAM_5XX_PROBE_WINDOW_S = 60.0
 
 def _context_thread_target(callback):
     """Bind a no-argument thread target to the caller's ContextVars."""
-    context = contextvars.copy_context()
-    return lambda: context.run(callback)
+    from agent.completion_inbox_silence import worker_target
+    return worker_target(callback)
 
 
 def _join_worker_for_relay_teardown(worker, *, label: str) -> None:
@@ -902,19 +902,19 @@ class _InlineRequest:
     misclassify the kill as staleness; ``stale`` is the one-shot transition."""
 
     def __init__(self, agent, api_kwargs: dict, stale_timeout: float, call_start: float):
+        from agent.memory_provider import spawn_context_thread
         self.agent = agent
         self.api_kwargs = api_kwargs
         self.stale_timeout = stale_timeout
         self.call_start = call_start
-        self.client = None
+        self.client = self._watchdog = None
         self.done = False
         self.stale = False
         self.cancelled = False
         self.lock = threading.Lock()
         self.abort_hook = self.abort  # single bound object: identity-checked on cleanup
         self._hb_stop = threading.Event()
-        self._hb = threading.Thread(target=self._activity_heartbeat, name="direct-api-activity-hb", daemon=True)
-        self._watchdog = None
+        self._hb = spawn_context_thread(_context_thread_target(self._activity_heartbeat), name="direct-api-activity-hb", daemon=True)
 
     def _activity_heartbeat(self) -> None:
         # Never put the API call itself on another worker thread — that is the nested-pool
@@ -936,7 +936,7 @@ class _InlineRequest:
         """Start the activity heartbeat and (for a finite budget) the stale timer."""
         self._hb.start()
         if math.isfinite(self.stale_timeout) and self.stale_timeout > 0:
-            self._watchdog = threading.Timer(self.stale_timeout, self._on_stale)
+            self._watchdog = threading.Timer(self.stale_timeout, _context_thread_target(self._on_stale))
             self._watchdog.name = "direct-api-stale-watchdog"
             self._watchdog.daemon = True
             self._watchdog.start()

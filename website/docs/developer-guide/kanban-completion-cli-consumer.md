@@ -1,0 +1,688 @@
+# Kanban Completion Classic CLI Consumer (Phase 4)
+
+## Status and scope
+
+Phase 4 starts from approved revision
+`25db90f21ad52cd75c7aa4ede95c070f713bb4e9` and is implemented by
+`c542a76d0419893ce86bbafffa5c86dd6e2c0e35`. The verified-compression-lineage
+continuity fix is `9cf313f8568848b8a74e9eac263375d4eef94368`. The independent-review blocker
+fix is `9338737c58fd48e524d48f214b732da6b1ce0e6a`. The restart and multi-compression
+recovery fix is `08dcf1112b0c65c098118b4e8f82ffe70bc8b0af`.
+
+Only the classic interactive CLI can consume completion deliveries in this phase. The
+`cli_enabled` flag remains false by default and must be explicitly enabled. One-shot CLI,
+ACP, cron, workers, dispatcher runs, tool executions, subagents, gateway, TUI, and Desktop
+do not receive consumer authority. The gateway, TUI, and repair flags remain refused.
+
+The CLI binds consumer authority to its exact active-session registry lease, profile state
+store, persisted CLI session incarnation, process PID, and process start time. The durable
+consumer row assigns a monotonic fence. Renewal requires the exact live authority. Expiry or
+reopen advances the fence. Release clears authority while retaining the last fence. A
+context-preserving heartbeat renews the fence during a silent completion model turn.
+
+The classic CLI polls while idle and after every user turn. Before staging every local user
+message it verifies authority and compares the live compression tip plus active transcript
+watermark, transferring ownership to a new compression tip and reloading external transcript
+changes when needed. A failed authority check is visible and prevents the local turn.
+
+Completion execution continues to use the Phase 2 saga. It preserves fenced admission,
+current-turn authority, exact durable tool-plan matching, atomic linked receipts, explicit
+acknowledgement, crash recovery, transactional effect deduplication, and suppression of
+completion-execution output. The CLI renders only the committed assistant receipt, then
+acknowledges the delivery.
+
+## Restart and multi-compression recovery fixes
+
+The next independent review reproduced two additional recovery gaps:
+
+1. If compression committed and the process restarted before the in-memory consumer transfer,
+   ordinary child acquisition started at fence `1` instead of advancing the verified ancestor
+   fence. A delivery retained by another fence-`1` owner could not be reclaimed.
+2. If replacement marker B committed after A's board admission, the process crashed before the
+   board update, and the session then compressed to C, recovery rejected B's ledger because it
+   was not already owned by C.
+
+Consumer acquisition now walks backward from the requested session only through canonical
+persisted compression edges selected by the same forward-chain rule. Every retained ancestor
+must be classic CLI. The new authority advances the maximum consumer fence whose stored session
+incarnation exactly matches a session in that chain. Noncanonical siblings, unrelated sessions,
+other surfaces, and deleted or recreated incarnations cannot contribute a fence.
+
+Crash-gap validation now accepts an uncommitted ledger on any exact pinned lineage ancestor. It
+still requires a leased delivery, the exact board, route, delivery, turn, role, marker metadata,
+ledger marker UID, and session incarnations. The board marker must be on an earlier pinned
+ancestor than the ledger marker, so recovery can move only forward through the verified lineage.
+The real poll path then reanchors the marker on C, commits one receipt there, acknowledges the
+delivery, and does no inference or effects on a second poll.
+
+### Follow-up regression results
+
+| Verification | Exact result |
+| --- | --- |
+| Restart acquisition red on `952ee50fe31318eb5453174ca91546627ddcc919` | **0 passed, 1 failed, 18 deselected**. Parent and child fences were both `1`, so `assert 1 > 1` failed. |
+| Multi-compression crash recovery red on the same revision | **0 passed, 1 failed, 13 deselected**. The real poll path failed with `RuntimeError: completion identity mismatch`. |
+| Phase 4 contracts on the exact implementation archive | **33 passed, 0 failed**. |
+| Combined foundation, saga, and Phase 4 suite | **211 passed, 0 failed**. |
+| Byte-exact 14-file affected suite | **200 passed, 0 failed, 4 platform skips**. |
+| 26-file candidate regression | **320 passed, 1 failed, 1 skipped, 4 strict xfailed**. |
+| Same 26 files on the clean starting revision rerun | **319 passed, 1 failed, 1 skipped, 4 strict xfailed**. |
+| Candidate/base failure-ID comparison | **Identical single failure ID**, with no new failure. The candidate adds one passing restart-fence contract to this suite. |
+| `scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. The existing reviewed BLE001 comment remains accepted. |
+| Committed-range, unstaged, and staged whitespace checks | **Passed**. |
+
+The shared regression failure remains
+`tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card`,
+the documented `auto_blocked` assertion. The first base comparison run reported **318 passed,
+2 failed, 1 skipped, 4 strict xfailed** because it also hit the documented intermittent
+WAL-preflight race in
+`test_concurrent_initializers_keep_one_board_identity`. The exact base rerun passed that test
+and produced the single shared failure above. The candidate did not hit the race.
+
+### Follow-up red evidence and snapshot provenance
+
+The red directory `/private/tmp/hermes-completion-phase4-review2-red.0yTMVn` was created from an
+exact archive of `952ee50fe31318eb5453174ca91546627ddcc919`. Only the final two contract files
+were copied into it. The regressions were run separately before implementation. This directory
+is intentionally a test overlay, not a byte-exact candidate.
+
+The candidate directory `/private/tmp/hermes-completion-phase4-review2-candidate.8Y76Gj` was
+created directly with `git archive 08dcf1112b0c65c098118b4e8f82ffe70bc8b0af`. No file was
+copied or overlaid after extraction. All candidate suite results above used this exact archive.
+
+The comparison base `/private/tmp/hermes-completion-phase4-review2-base.2pM7lZ` was created
+directly with `git archive 952ee50fe31318eb5453174ca91546627ddcc919` and had no overlay.
+Both exact snapshots lack `.git`, so the optional precompile printed
+`fatal: not a git repository`. Test collection and execution continued normally.
+
+### Exact follow-up commands
+
+Red snapshot creation:
+
+```bash
+git archive 952ee50fe31318eb5453174ca91546627ddcc919 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review2-red.0yTMVn
+cp tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  /private/tmp/hermes-completion-phase4-review2-red.0yTMVn/tests/hermes_cli/
+```
+
+Independent red regressions, run from that red directory:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k restart_on_verified_compression_tip_advances_ancestor_fence
+
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k poll_recovers_reanchor_crash_after_another_compression
+```
+
+Exact implementation and comparison snapshots:
+
+```bash
+git archive 08dcf1112b0c65c098118b4e8f82ffe70bc8b0af | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review2-candidate.8Y76Gj
+git archive 952ee50fe31318eb5453174ca91546627ddcc919 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review2-base.2pM7lZ
+```
+
+The exact candidate used the unchanged two-file Phase 4, nine-file combined, 14-file affected,
+and 26-file regression `scripts/run_tests.sh` command blocks documented below. The exact base
+used the same 26-file command. Every run used `--file-retries 0`.
+
+Failure comparison and repository checks:
+
+```bash
+diff -u \
+  <(grep '^FAILED ' /private/tmp/hermes-completion-phase4-review2-regression-base-rerun.log | sort -u) \
+  <(grep '^FAILED ' /private/tmp/hermes-completion-phase4-review2-regression-candidate.log | sort -u)
+scripts/check
+git diff --check 952ee50fe31318eb5453174ca91546627ddcc919..08dcf1112b0c65c098118b4e8f82ffe70bc8b0af
+git diff --check
+git diff --cached --check
+```
+
+Follow-up logs:
+
+- `/private/tmp/hermes-completion-phase4-review2-red-fence.log`
+- `/private/tmp/hermes-completion-phase4-review2-red-reanchor.log`
+- `/private/tmp/hermes-completion-phase4-review2-narrow-exact.log`
+- `/private/tmp/hermes-completion-phase4-review2-combined-exact.log`
+- `/private/tmp/hermes-completion-phase4-review2-affected-exact.log`
+- `/private/tmp/hermes-completion-phase4-review2-regression-candidate.log`
+- `/private/tmp/hermes-completion-phase4-review2-regression-base.log`
+- `/private/tmp/hermes-completion-phase4-review2-regression-base-rerun.log`
+- `/private/tmp/hermes-completion-phase4-review2-check.log`
+
+## Independent-review blocker fixes
+
+Independent review found three continuity gaps after the first lineage fix:
+
+1. Consumer transfer to a verified compression child could reset the durable fence instead of
+   advancing the parent fence.
+2. A marker already admitted on the parent, or a receipt already committed there, could not be
+   recovered after the active classic CLI transferred to the child.
+3. Route discovery could follow a stale ordinary sibling instead of the canonical compression
+   tip, hiding the immutable parent route from the live child.
+
+The fix adds a verified transfer operation that advances the parent fence while retaining the
+exact profile, lease owner, PID, process start time, session incarnation, expiry, and persisted
+parent-to-child compression step. An unrelated session cannot use this operation. Existing
+independent session acquisition remains separate.
+
+The inbox now pins the full canonical persisted compression lineage with each session's exact
+incarnation and revalidates that lineage on every operation. An admitted ancestor marker is
+reanchored to the live tip without changing its board, delivery, turn, tool plan, or durable
+effect ledger. An ancestor receipt remains immutable on its original session and is presented
+and acknowledged under the live tip's authority without rerunning inference or effects. Route
+discovery starts from each immutable CLI route and accepts it only when that route's canonical
+persisted tip is the current session. A stale sibling therefore cannot redirect discovery.
+
+These changes do not accept caller-supplied ancestry. They do not join unrelated `/new` or
+`/resume` sessions, deleted and recreated sessions, copied profiles, delegates, tool sessions,
+or non-CLI origins. Immutable route ownership and the no-historical-replay rule remain intact.
+
+### Independent-review regression results
+
+| Verification | Exact result |
+| --- | --- |
+| Fence continuity red on `aa3e2f666078b1d2a0b69c4d1ae69fbb9b0248a8` | **0 passed, 1 failed, 16 deselected**. The child fence was `1`, so `assert 1 > 2` failed. |
+| Ancestor checkpoint recovery red on the same revision | **0 passed, 2 failed, 11 deselected**. Both admitted-marker and committed-receipt cases failed with `RuntimeError: completion identity mismatch`. |
+| Stale-sibling route discovery red on the same revision | **0 passed, 1 failed, 12 deselected**. `_route_map()` returned `{}` instead of the immutable parent route. |
+| Phase 4 contracts on the exact implementation archive | **31 passed, 0 failed**. |
+| Combined foundation, saga, and Phase 4 suite | **209 passed, 0 failed**. |
+| Byte-exact 14-file affected suite | **198 passed, 0 failed, 4 platform skips**. |
+| 26-file candidate regression | **319 passed, 1 failed, 1 skipped, 4 strict xfailed**. |
+| Same 26 files on the starting revision | **317 passed, 1 failed, 1 skipped, 4 strict xfailed**. |
+| Candidate/base failure-ID comparison | **Identical single failure ID**, with no new failure. The candidate adds two passing fence contracts to this suite. |
+| `scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. The existing reviewed BLE001 comment remains accepted. |
+| Unstaged and staged `git diff --check` | **Passed**. |
+
+The shared regression failure is
+`tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card`,
+the previously documented `auto_blocked` assertion. The four strict expected failures are the
+existing crash-contract cases. The four affected-suite skips are Windows-only tests on macOS.
+The documented intermittent WAL-preflight race did not occur.
+
+An initial affected-suite run inside the worktree reported 45 real-home guard failures in
+`test_cli_init.py` and `test_stream_json.py` because that layout exposes the worktree manifest.
+The byte-exact archive run passed all 198 executed tests. This is an execution-layout artifact,
+not a candidate failure.
+
+### Independent-review red evidence and snapshot provenance
+
+The red directory `/private/tmp/hermes-completion-phase4-review-red.10m6T7` was created from an
+exact archive of the starting revision
+`aa3e2f666078b1d2a0b69c4d1ae69fbb9b0248a8`. Only the final two contract files were copied
+into it. The three regressions were then run separately so each blocker had independent red
+evidence. This directory is intentionally a test overlay, not a byte-exact candidate.
+
+The candidate directory `/private/tmp/hermes-completion-phase4-review-candidate.TKnMdJ` was
+created directly with `git archive 9338737c58fd48e524d48f214b732da6b1ce0e6a`. No file was
+copied or overlaid after extraction. The narrow, combined, affected, and candidate regression
+runs all used this byte-exact implementation snapshot.
+
+The base comparison directory `/private/tmp/hermes-completion-phase4-review-base.u6YsKq` was
+created directly with `git archive aa3e2f666078b1d2a0b69c4d1ae69fbb9b0248a8`. It had no
+overlay. Both exact archives lack `.git`, so the runner's optional precompile printed
+`fatal: not a git repository`. Test collection and execution continued normally.
+
+### Exact independent-review commands
+
+Red snapshot creation:
+
+```bash
+git archive aa3e2f666078b1d2a0b69c4d1ae69fbb9b0248a8 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review-red.10m6T7
+cp tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  /private/tmp/hermes-completion-phase4-review-red.10m6T7/tests/hermes_cli/
+```
+
+Independent red regressions, run from that red directory:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k verified_compression_transfer_advances_the_parent_fence
+
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k poll_recovers_ancestor_checkpoint_after_compression
+
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 1 \
+  -k route_discovery_uses_canonical_tip_when_stale_sibling_exists
+```
+
+Exact candidate and base creation:
+
+```bash
+git archive 9338737c58fd48e524d48f214b732da6b1ce0e6a | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review-candidate.TKnMdJ
+git archive aa3e2f666078b1d2a0b69c4d1ae69fbb9b0248a8 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-review-base.u6YsKq
+```
+
+The 31-contract narrow run used the documented two-file Phase 4 command below. The 209-contract
+combined run used the documented nine-file combined command below. The 198-test affected run
+used the documented 14-file affected command below. The candidate and base comparison used the
+documented 26-file regression command below. In each case the command ran from the exact archive
+named above with `--file-retries 0`.
+
+Failure-ID comparison and repository checks:
+
+```bash
+diff -u \
+  <(grep '^FAILED ' /private/tmp/hermes-completion-phase4-review-regression-base.log | sort -u) \
+  <(grep '^FAILED ' /private/tmp/hermes-completion-phase4-review-regression-candidate.log | sort -u)
+scripts/check
+git diff --check
+git diff --cached --check
+```
+
+Independent-review logs:
+
+- `/private/tmp/hermes-completion-phase4-review-red-fence.log`
+- `/private/tmp/hermes-completion-phase4-review-red-checkpoints.log`
+- `/private/tmp/hermes-completion-phase4-review-red-route.log`
+- `/private/tmp/hermes-completion-phase4-review-narrow-exact.log`
+- `/private/tmp/hermes-completion-phase4-review-combined-exact.log`
+- `/private/tmp/hermes-completion-phase4-review-affected-exact.log`
+- `/private/tmp/hermes-completion-phase4-review-regression-candidate.log`
+- `/private/tmp/hermes-completion-phase4-review-regression-base.log`
+
+## Verified compression-lineage continuity fix
+
+The original Phase 4 implementation selected only routes owned by the current session ID.
+After a classic CLI compressed from parent A to child B, its durable consumer authority moved
+to B while the immutable route remained owned by A. The pending delivery therefore became
+invisible to the live consumer.
+
+The fix derives the current session's persisted compression lineage from the profile store and
+admits only immutable CLI routes in that lineage. The saga independently derives the route's
+canonical persisted route-to-tip chain, binds execution to the exact live tip incarnation and
+consumer row, and revalidates that chain on every cross-store operation. It never accepts
+caller-supplied ancestry. The original route remains owned by A while the marker, committed
+receipt, turn lease, retirement checks, and transcript guards target B.
+
+This preserves exact profile path, route-session incarnation, live-tip incarnation,
+active-session lease, PID and process-start identity, monotonic consumer fence, lease owner,
+turn authority, durable receipt, retry, and transactional effect-idempotency checks. Reset
+forks, explicit branches, delegates, tool sessions, copied profiles, recreated session IDs, and
+unrelated sessions do not join the canonical compression chain. There is no historical replay.
+
+### Fix verification results
+
+| Verification | Exact result |
+| --- | --- |
+| Red regression on `c542a76d0419893ce86bbafffa5c86dd6e2c0e35` | **0 passed, 1 failed, 9 deselected**. `poll_completion_inbox(cli)` returned `0` instead of `1`. |
+| Existing 25 Phase 4 contracts plus lineage regression | **26 passed, 0 failed**. |
+| Existing 203 combined foundation/saga/Phase 4 contracts plus lineage regression | **204 passed, 0 failed**. |
+| Byte-exact 14-file affected suite | **193 passed, 0 failed, 4 platform skips**. |
+| 26-file candidate regression | **301 passed, 17 failed, 1 skipped, 4 strict xfailed**. |
+| Same 26 files on `c542a76d0419893ce86bbafffa5c86dd6e2c0e35` | **301 passed, 17 failed, 1 skipped, 4 strict xfailed**. |
+| Candidate/base failure-ID comparison | **Identical 17 failure IDs**, with no new failure. The 16 real-home guard failures and one `auto_blocked` assertion are unchanged. |
+| `python scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. |
+| Unstaged and staged `git diff --check` | **Passed**. |
+
+The documented intermittent WAL-preflight race did not occur in these fix-verification runs.
+
+### Fix red evidence and isolated provenance
+
+The red directory `/private/tmp/hermes-completion-phase4-lineage-red.oVzWsh` was created from
+an exact archive of `c542a76d0419893ce86bbafffa5c86dd6e2c0e35`, then only the final regression
+test file was copied into it. It is intentionally a red test overlay, not a byte-exact candidate
+snapshot. The failing assertion is recorded in
+`/private/tmp/hermes-completion-phase4-lineage-red.log`.
+
+The affected-suite candidate directory
+`/private/tmp/hermes-completion-phase4-lineage-candidate.vHMgOO` was created directly with
+`git archive 9cf313f8568848b8a74e9eac263375d4eef94368`. No file was copied or overlaid after
+archive extraction. This is the byte-exact isolated candidate used for the 26-contract,
+204-contract, and 14-file affected-suite results. Because an archive has no `.git` directory,
+the runner's optional precompile printed `fatal: not a git repository`. Collection and execution
+continued normally.
+
+The regression base directory
+`/Users/chriskaneshiro/.hermes/hermes-agent/.worktrees/completion-inbox-phase4-lineage-base.3sGj2Q`
+was created directly with `git archive c542a76d0419893ce86bbafffa5c86dd6e2c0e35` in the
+same worktree-layout parent as the implementation worktree used for the candidate regression.
+It had no overlay. This placement intentionally reproduced the same documented real-home
+manifest guard in both regression runs.
+
+### Exact fix commands
+
+Red regression:
+
+```bash
+git archive c542a76d0419893ce86bbafffa5c86dd6e2c0e35 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-lineage-red.oVzWsh
+cp tests/hermes_cli/test_cli_completion_consumer.py \
+  /private/tmp/hermes-completion-phase4-lineage-red.oVzWsh/tests/hermes_cli/
+cd /private/tmp/hermes-completion-phase4-lineage-red.oVzWsh
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 1 -k verified_live_compression_tip
+```
+
+Byte-exact candidate creation:
+
+```bash
+snapshot_dir=$(mktemp -d \
+  /private/tmp/hermes-completion-phase4-lineage-candidate.XXXXXX)
+git archive 9cf313f8568848b8a74e9eac263375d4eef94368 | \
+  tar -x -C "$snapshot_dir"
+```
+
+The exact 26-contract and 204-contract commands are the existing Phase 4 contract and combined
+commands below, run from the byte-exact candidate. The exact affected-suite command is the
+existing 14-file command below, also run from that candidate.
+
+Candidate/base regression:
+
+```bash
+base_dir=$(mktemp -d \
+  /Users/chriskaneshiro/.hermes/hermes-agent/.worktrees/completion-inbox-phase4-lineage-base.XXXXXX)
+git archive c542a76d0419893ce86bbafffa5c86dd6e2c0e35 | \
+  tar -x -C "$base_dir"
+
+# Run the documented 26-file regression command below once from the candidate
+# and once from "$base_dir", then compare normalized failure IDs.
+diff -u \
+  <(rg '^FAILED ' /private/tmp/hermes-completion-phase4-lineage-regression-base.log | sort -u) \
+  <(rg '^FAILED ' /private/tmp/hermes-completion-phase4-lineage-regression-candidate.log | sort -u)
+```
+
+Repository checks:
+
+```bash
+/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python scripts/check
+git diff --check
+git diff --cached --check
+```
+
+Fix logs:
+
+- `/private/tmp/hermes-completion-phase4-lineage-red.log`
+- `/private/tmp/hermes-completion-phase4-lineage-narrow-exact.log`
+- `/private/tmp/hermes-completion-phase4-lineage-combined-exact.log`
+- `/private/tmp/hermes-completion-phase4-lineage-affected-isolated.log`
+- `/private/tmp/hermes-completion-phase4-lineage-regression-candidate.log`
+- `/private/tmp/hermes-completion-phase4-lineage-regression-base.log`
+- `/private/tmp/hermes-completion-phase4-lineage-check-receipt.log`
+
+## Original Phase 4 verification results
+
+| Verification | Exact result |
+| --- | --- |
+| Start gate | Worktree clean and `HEAD` exactly `25db90f21ad52cd75c7aa4ede95c070f713bb4e9`. |
+| Final Phase 4 contracts on approved base | **1 passed, 24 failed**. The passing one-shot rejection was already enforced. All 24 failures were missing Phase 4 behavior. |
+| Final Phase 4 contracts on implementation | **25 passed, 0 failed**. |
+| Foundation, saga, and Phase 4 combined suite | **203 passed, 0 failed** on the exact implementation commit. |
+| Isolated 14-file affected suite | **192 passed, 0 failed, 4 platform skips**. |
+| Documented 26-file candidate suite | **301 passed, 17 failed, 1 skipped, 4 strict xfailed**. |
+| Same 26 files on approved base | **285 passed, 17 failed, 1 skipped, 9 strict xfailed**. |
+| Supplemental isolated 26-file candidate | **317 passed, 1 failed, 1 skipped, 4 strict xfailed**. The 16 real-home guard failures disappear outside the worktree layout. |
+| `python scripts/check` | **11 checks passed, 0 blockers, 0 advisories**. One reviewed BLE001 waiver covers fail-closed heartbeat exception capture. |
+| Unstaged and staged `git diff --check` | **Passed**. |
+
+The candidate and approved base have the same 17 failing test IDs. Fourteen failures in
+`tests/hermes_cli/test_kanban_notify.py` and two failures in
+`tests/tools/test_kanban_tools.py` are the documented real-home manifest guard. The remaining
+`tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card`
+failure is the documented `auto_blocked` assertion. The candidate adds 11 terminal contracts
+and turns five prior terminal strict expected failures into passes. This accounts for 16
+additional passes and the reduction from nine to four strict expected failures.
+
+The exact shared failure list is:
+
+```text
+tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card
+tests/hermes_cli/test_kanban_notify.py::test_gateway_autosubscribe_roundtrips_user_id_alt_for_session_key[channel-None-False]
+tests/hermes_cli/test_kanban_notify.py::test_gateway_autosubscribe_roundtrips_user_id_alt_for_session_key[group-th-42-True]
+tests/hermes_cli/test_kanban_notify.py::test_gateway_create_autosubscribes_on_explicit_board
+tests/hermes_cli/test_kanban_notify.py::test_notifier_artifact_delivery_skips_missing_files
+tests/hermes_cli/test_kanban_notify.py::test_notifier_notify_plus_wake_sends_and_wakes
+tests/hermes_cli/test_kanban_notify.py::test_notifier_notify_wake_does_not_wake_on_status_event
+tests/hermes_cli/test_kanban_notify.py::test_notifier_plain_notify_never_wakes_even_with_session_id
+tests/hermes_cli/test_kanban_notify.py::test_notifier_unsubs_after_abnormal_events[crashed]
+tests/hermes_cli/test_kanban_notify.py::test_notifier_unsubs_after_abnormal_events[gave_up]
+tests/hermes_cli/test_kanban_notify.py::test_notifier_unsubs_after_abnormal_events[timed_out]
+tests/hermes_cli/test_kanban_notify.py::test_notifier_uploads_review_handoff_artifacts
+tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_forwards_persisted_chat_type_and_user_id
+tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_only_skips_send_and_advances_cursor
+tests/hermes_cli/test_kanban_notify.py::test_notifier_wakes_origin_for_review_and_keeps_subscription
+tests/tools/test_kanban_tools.py::test_create_tui_subscription_binds_to_live_session_after_compaction_fork
+tests/tools/test_kanban_tools.py::test_live_tui_session_key_uses_profile_store
+```
+
+The historical WAL-preflight race occurred once during a combined-suite run:
+`test_concurrent_initializers_keep_one_board_identity` saw its temporary `racing.db-wal`
+between existence and writability probes. The exact rerun passed all 203 tests, and the exact
+implementation-commit run also passed all 203 tests. This is the documented intermittent race,
+not a new Phase 4 failure.
+
+## Red evidence
+
+The final two Phase 4 test files were copied without implementation changes into an archive of
+the exact approved revision at
+`/private/tmp/hermes-completion-phase4-red-final.8gGWJx`. The run returned exit 1 with
+**1 pass and 24 failures**. Failures showed the CLI flag still refused, no consumer lease API,
+no durable fence lifecycle, no transcript refresh or compression transfer, no CLI poll hooks,
+and no fenced poll/run/present/ack path.
+
+The archive has no `.git` directory, so the runner's optional precompile printed
+`fatal: not a git repository`. Collection and execution continued normally. Complete red
+output is in `/private/tmp/hermes-completion-phase4-red-final.log`.
+
+## Exact commands
+
+Start gate:
+
+```bash
+git status --short
+git rev-parse HEAD
+```
+
+Red on the exact approved archive:
+
+```bash
+git archive 25db90f21ad52cd75c7aa4ede95c070f713bb4e9 | \
+  tar -x -C /private/tmp/hermes-completion-phase4-red-final.8gGWJx
+cp tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  /private/tmp/hermes-completion-phase4-red-final.8gGWJx/tests/hermes_cli/
+cd /private/tmp/hermes-completion-phase4-red-final.8gGWJx
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh \
+  tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 2
+```
+
+Final Phase 4 contracts:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh \
+  tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 2
+```
+
+Foundation, Phase 2 saga, and Phase 4 contracts:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh \
+  tests/hermes_cli/test_kanban_delivery.py \
+  tests/hermes_cli/test_kanban_delivery_migration.py \
+  tests/hermes_cli/test_kanban_delivery_config.py \
+  tests/hermes_state/test_kanban_return_routes.py \
+  tests/hermes_cli/test_kanban_delivery_review.py \
+  tests/hermes_cli/test_sqlite_migration_backup.py \
+  tests/hermes_cli/test_completion_inbox_saga.py \
+  tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  -q --tb=short --file-retries 0 -j 4
+```
+
+Affected suites in the isolated candidate at
+`/private/tmp/hermes-completion-phase4-candidate-final.u3mq3W`:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh \
+  tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/hermes_cli/test_cli_completion_consumer.py \
+  tests/hermes_cli/test_active_sessions.py \
+  tests/hermes_cli/test_active_session_exclusivity.py \
+  tests/hermes_cli/test_cli_active_session_limit.py \
+  tests/hermes_cli/test_single_query_session_finalize.py \
+  tests/hermes_cli/test_chat_q_exit_clear.py \
+  tests/hermes_cli/test_stream_json.py \
+  tests/hermes_cli/test_cli_init.py \
+  tests/hermes_cli/test_goals.py \
+  tests/hermes_cli/test_process_notification_display.py \
+  tests/hermes_cli/test_subagent_notification_display.py \
+  tests/tools/test_bot_live_owner_delivery.py \
+  tests/tui_gateway/test_compute_host_borrowed_lease.py \
+  -q --tb=short --file-retries 0 -j 4
+```
+
+Candidate and approved-base 26-file regression command:
+
+```bash
+HERMES_PYTHON=/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python \
+scripts/run_tests.sh \
+  tests/hermes_cli/test_kanban_delivery.py \
+  tests/hermes_cli/test_kanban_delivery_migration.py \
+  tests/hermes_cli/test_kanban_delivery_config.py \
+  tests/hermes_state/test_kanban_return_routes.py \
+  tests/hermes_cli/test_kanban_terminal_fencing_contract.py \
+  tests/tui_gateway/test_kanban_completion_crash_contract.py \
+  tests/tools/test_kanban_tools.py \
+  tests/hermes_cli/test_kanban_db.py \
+  tests/hermes_cli/test_kanban_notify.py \
+  tests/hermes_cli/test_kanban_db_init.py \
+  tests/hermes_cli/test_kanban_decompose_db.py \
+  tests/hermes_cli/test_kanban_creator_origin.py \
+  tests/hermes_cli/test_kanban_review_lifecycle.py \
+  tests/hermes_cli/test_kanban_write_txn_busy_retry.py \
+  tests/hermes_cli/test_kanban_transfer.py \
+  tests/hermes_cli/test_kanban_gc_retention.py \
+  tests/hermes_cli/test_kanban_task_updated_hook.py \
+  tests/plugins/test_kanban_dashboard_task_updated_hook.py \
+  tests/tools/test_kanban_unknown_arguments.py \
+  tests/hermes_state/test_schema_read_probe.py \
+  tests/hermes_state/test_dedupe_migration_contention.py \
+  tests/gateway/test_kanban_wake_acceptance.py \
+  tests/gateway/test_kanban_changes_requested_notifier.py \
+  tests/gateway/test_kanban_notifier_wake_only_ordering.py \
+  tests/gateway/test_kanban_route_anchor_capture.py \
+  tests/tui_gateway/test_kanban_notify_poller.py \
+  -q --tb=short --file-retries 0 -j 4
+```
+
+The base used the exact approved archive in the same worktree layout:
+
+```bash
+phase4_base_dir=$(mktemp -d \
+  /Users/chriskaneshiro/.hermes/hermes-agent/.worktrees/completion-inbox-phase4-base.XXXXXX)
+git archive 25db90f21ad52cd75c7aa4ede95c070f713bb4e9 | \
+  tar -x -C "$phase4_base_dir"
+```
+
+Repository checks:
+
+```bash
+/private/tmp/hermes-completion-phase01.G1Ybro/test-env/bin/python scripts/check
+git diff --check
+git diff --cached --check
+```
+
+Final logs:
+
+- `/private/tmp/hermes-completion-phase4-red-final.log`
+- `/private/tmp/hermes-completion-phase4-narrow-final.log`
+- `/private/tmp/hermes-completion-phase4-foundation-final-exact-commit.log`
+- `/private/tmp/hermes-completion-phase4-affected-isolated-final.log`
+- `/private/tmp/hermes-completion-phase4-regression-candidate-final-home.log`
+- `/private/tmp/hermes-completion-phase4-regression-base-final.log`
+- `/private/tmp/hermes-completion-phase4-check-final.log`
+
+## Changed files
+
+Restart and multi-compression recovery fix:
+
+- `hermes_cli/completion_inbox.py`
+- `hermes_state_kanban.py`
+- `tests/hermes_cli/test_cli_completion_consumer.py`
+- `tests/hermes_cli/test_kanban_terminal_fencing_contract.py`
+
+Its separate verification receipt revision changes only
+`website/docs/developer-guide/kanban-completion-cli-consumer.md`.
+
+Independent-review blocker fix:
+
+- `hermes_cli/active_sessions.py`
+- `hermes_cli/cli_completion_consumer.py`
+- `hermes_cli/completion_inbox.py`
+- `hermes_cli/completion_inbox_store.py`
+- `hermes_state_kanban.py`
+- `tests/hermes_cli/test_cli_completion_consumer.py`
+- `tests/hermes_cli/test_kanban_terminal_fencing_contract.py`
+
+Its separate verification receipt revision changes only
+`website/docs/developer-guide/kanban-completion-cli-consumer.md`.
+
+Compression-lineage continuity fix:
+
+- `hermes_cli/cli_completion_consumer.py`
+- `hermes_cli/completion_inbox.py`
+- `tests/hermes_cli/test_cli_completion_consumer.py`
+
+The separate follow-up receipt revision changes only
+`website/docs/developer-guide/kanban-completion-cli-consumer.md`.
+
+Original Phase 4 implementation revision:
+
+- `hermes_cli/active_sessions.py`
+- `hermes_cli/cli_chat_turn_mixin.py`
+- `hermes_cli/cli_completion_consumer.py`
+- `hermes_cli/cli_tui_runtime_mixin.py`
+- `hermes_cli/completion_inbox.py`
+- `hermes_cli/config_defaults.py`
+- `hermes_cli/kanban_delivery.py`
+- `hermes_state_kanban.py`
+- `tests/hermes_cli/test_cli_completion_consumer.py`
+- `tests/hermes_cli/test_kanban_delivery.py`
+- `tests/hermes_cli/test_kanban_terminal_fencing_contract.py`
+- `website/docs/developer-guide/kanban-completion-foundation.md`
+
+The separate receipt revision adds only
+`website/docs/developer-guide/kanban-completion-cli-consumer.md`.
+
+## Limitations
+
+- The consumer discovers existing default and named local board stores. It does not create a
+  board, replay historical events, or scan hosted stores.
+- Each poll consumes at most one actionable delivery. The two-second idle cadence and forced
+  post-turn poll bound prompt-loop work without adding a dispatcher.
+- Rendering occurs before explicit acknowledgement. A crash after successful display and before
+  acknowledgement can display the same committed receipt again. The Phase 2 receipt prevents
+  repeated inference and tool side effects.
+- If active ownership or heartbeat renewal is lost during a model turn, the operation fails
+  closed. The delivery remains retryable, and any already committed Phase 2 receipt is recovered
+  without re-running inference.
+
+No TUI, Desktop, gateway, repair, JEV, hosted egress, or historical replay consumer was added.
+No live database migration, service restart, production configuration change, push, or merge
+occurred. All database execution used disposable test stores. Phase 5 has not started.

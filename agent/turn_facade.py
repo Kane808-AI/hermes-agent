@@ -32,6 +32,16 @@ class TurnFacadeMixin:
         prelude: Optional[Generator]=None,
     ) -> dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
+        from agent.completion_inbox_execution import current_execution
+        completion = current_execution()
+        if completion is not None:
+            from agent.completion_inbox_native import run_native_turn
+            return run_native_turn(completion, self, user_message, system_message, conversation_history, task_id,
+                                   stream_callback=stream_callback, persist_user_message=persist_user_message,
+                                   persist_user_timestamp=persist_user_timestamp, persist_user_display_kind=persist_user_display_kind,
+                                   persist_user_display_metadata=persist_user_display_metadata,
+                                   persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
+                                   turn_author=turn_author, title_user_message=title_user_message)
         # A review shares this session_id for cache parity: fence review startup or interrupt
         # an admitted request and await its exit before opening live-turn instrumentation.
         # Foreground priority is retained if the review does not acknowledge within the bounded deadline
@@ -64,6 +74,8 @@ class TurnFacadeMixin:
             "platform": getattr(self, "platform", None) or "",
         }
         relay_turn_id = f"{session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+        from agent.completion_inbox_execution import completion_turn_id
+        relay_turn_id = completion_turn_id(self, relay_turn_id)
         self._relay_pending_turn_id = relay_turn_id
         relay_parent_session_id = (
             str(getattr(self, "_parent_session_id", None) or "")

@@ -838,6 +838,9 @@ def reconstruct_static_prefix(agent: Any, system_message: Optional[str] = None, 
     when the stored prompt literally starts with it; otherwise static stays
     None and the stored bytes are sent untouched.  A failed rebuild is memoized
     per stored prompt so the retry-loop hot path doesn't redo the file I/O."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     stored = getattr(agent, "_cached_system_prompt", None)
     existing = getattr(agent, "_cached_system_prompt_static", None)
     if (

@@ -665,6 +665,8 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    return_route_id: Optional[str] = None
+    origin_interactive: bool = False
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Task:
@@ -682,6 +684,7 @@ class Task:
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
+            origin_interactive=bool(g("origin_interactive")),
         )
 
 
@@ -694,7 +697,7 @@ _TASK_REQUIRED_COLUMNS = (
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "return_route_id",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -887,6 +890,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- profile's state.db (kanban_create verifies before stamping). Indexed
     -- so per-session list queries stay cheap on larger boards.
     session_id           TEXT,
+    return_route_id      TEXT,
+    origin_interactive   INTEGER NOT NULL DEFAULT 0,
     -- Typed block reason set by ``block_task`` (one of VALID_BLOCK_KINDS, or
     -- NULL for legacy/un-typed blocks). Drives routing: ``dependency`` never
     -- sits in ``blocked`` (goes to ``todo`` for parent-gating); the others go
@@ -921,6 +926,8 @@ CREATE TABLE IF NOT EXISTS task_events (
     task_id    TEXT NOT NULL,
     run_id     INTEGER,
     kind       TEXT NOT NULL,
+    producer_version INTEGER NOT NULL DEFAULT 0,
+    delivery_expected INTEGER NOT NULL DEFAULT 0,
     payload    TEXT,
     created_at INTEGER NOT NULL
 );
@@ -1210,6 +1217,7 @@ def create_task(
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
+    from hermes_cli.kanban_delivery import task_delivery_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
     completion_contract = validate_contract(completion_contract)
@@ -1275,6 +1283,7 @@ def create_task(
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
                 task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
+                return_route_id, origin_interactive = task_delivery_origin(conn, parents, creator_task_id)
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
@@ -1292,8 +1301,9 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract,
+                        return_route_id, origin_interactive
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1303,6 +1313,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        return_route_id, origin_interactive,
                     ),
                 )
                 for pid in parents:
@@ -1865,17 +1876,6 @@ def _insert_comment(
     conn.execute(
         "INSERT INTO task_comments (task_id, author, body, created_at) "
         "VALUES (?, ?, ?, ?)", (task_id, author, body, created_at),
-    )
-
-
-def _append_event(
-    conn: sqlite3.Connection, task_id: str, kind: str, payload: Optional[dict] = None, *,
-    run_id: Optional[int] = None,
-) -> None:
-    """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
-    conn.execute(
-        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
     )
 
 
@@ -4222,21 +4222,6 @@ def _retention_seconds(older_than_seconds: int) -> int:
     return older_than_seconds
 
 
-def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
-
-    ``older_than_seconds=0`` means everything older than now; the CLI maps
-    ``--event-retention-days 0`` to "disabled" before calling this.
-    """
-    cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
-    with write_txn(conn):
-        cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
-        )
-    return int(cur.rowcount or 0)
-
-
 def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[str] = None) -> int:
     """Delete worker log files older than the cutoff on one board; returns the count.
 
@@ -4424,6 +4409,7 @@ from hermes_cli.kanban_db_boards import (
     remove_board,
     write_board_metadata,
 )
+from hermes_cli.kanban_delivery import _append_event, gc_events  # noqa: E402
 from hermes_cli.kanban_db_connect import (
     _INITIALIZED_PATHS,
     init_db,

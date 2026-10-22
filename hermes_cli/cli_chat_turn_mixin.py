@@ -79,6 +79,8 @@ class CLIChatTurnMixin:
         agent = self.agent
         if agent is None:
             return None
+        if not self._prepare_completion_before_local_turn():
+            return None
         self._sync_fallback_chain_with_config(agent)  # chain added after this chat opened reaches this turn
         message = self._chat_route_images(message, images)
 
@@ -124,6 +126,21 @@ class CLIChatTurnMixin:
                 return None
             finally:
                 self._chat_release_turn_audio(turn)
+
+    def _prepare_completion_before_local_turn(self) -> bool:
+        """Fence and reload external completion changes before staging user input."""
+        try:
+            from hermes_cli.cli_completion_consumer import prepare_local_turn
+
+            prepare_local_turn(self)
+            return True
+        except Exception as exc:
+            from cli import _cprint
+            from rich.markup import escape
+
+            _cprint(f"[bold red]Completion inbox unavailable: {escape(str(exc))}[/]")
+            logging.error("Completion inbox refused the local turn: %s", exc, exc_info=True)
+            return False
 
     def _chat_release_turn_audio(self, turn):
         """Every exit path: stop the thinking sound, send the TTS sentinel, cut TTS only if abnormal."""
@@ -518,9 +535,12 @@ class CLIChatTurnMixin:
         # titling and the exit summary target the live child, not the ended parent.
         if (self.agent and getattr(self.agent, "session_id", None)
                 and self.agent.session_id != self.session_id):
+            old_session_id, new_session_id = self.session_id, self.agent.session_id
             from tools.approval_yolo import transfer_session_yolo
-            transfer_session_yolo(self.session_id, self.agent.session_id)
-            self.session_id = self.agent.session_id
+            transfer_session_yolo(old_session_id, new_session_id)
+            self.session_id = new_session_id
+            from hermes_cli.cli_completion_consumer import _transfer_live_session
+            _transfer_live_session(self, new_session_id)
             self._write_terminal_breadcrumb()
             self._pending_title = None
 

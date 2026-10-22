@@ -1306,6 +1306,9 @@ def _reconcile_store_consent(store: SharedMetricsStore, send_enabled: bool) -> N
 
 def enabled() -> bool:
     """Return the shared-metrics policy for the active Hermes profile."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return False
     profile_key = relay_runtime.current_profile_key()
     try:
         config: Any = _raw_config()
@@ -1362,6 +1365,9 @@ def _reconcile_send_consent_once() -> None:
 
 def observe_lifecycle(hook_name: str, **kwargs: Any) -> None:
     """Project one Hermes lifecycle event into the core Relay integration."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     _reconcile_send_consent_once()
     if not handles_hook(hook_name) or not relay_runtime.relay_instrumentation_enabled():
         return

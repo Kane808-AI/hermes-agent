@@ -401,6 +401,9 @@ def _kb_poll_board(_kb, slug: str, session_key: str) -> list:
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
             _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
+            from tui_gateway.completion_inbox import legacy_events
+
+            events = legacy_events(conn, events, _load_cfg())
             if not events:
                 continue
             task = _kb.get_task(conn, sub["task_id"])
@@ -454,6 +457,10 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
 def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed (never re-queued), so they wait in the buffer instead of dropping the agent turn."""
+    from tui_gateway.completion_inbox import enabled, poll_guarded
+
+    if enabled(session, _load_cfg()):
+        poll_guarded(sid, session)
     try:
         texts = _collect_kanban_notifications(session)
     except Exception as exc:

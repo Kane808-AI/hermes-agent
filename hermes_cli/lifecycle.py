@@ -25,6 +25,9 @@ def _plugin_hooks(hook_name: str, **kwargs: Any) -> list[Any]:
 
 def invoke_hook(hook_name: str, **kwargs: Any) -> list[Any]:
     """Notify first-party observers, then invoke compatibility plugin hooks."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return []
     _observe(hook_name, **kwargs)
     return _plugin_hooks(hook_name, **kwargs)
 
@@ -32,6 +35,9 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> list[Any]:
 async def ainvoke_hook(hook_name: str, **kwargs: Any) -> list[Any]:
     """:func:`invoke_hook` for callers on an event loop: same observers-then-plugins
     composition, with ``async def`` plugin callbacks awaited on that loop."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return []
     _observe(hook_name, **kwargs)
     from hermes_cli import plugins
 
@@ -40,6 +46,9 @@ async def ainvoke_hook(hook_name: str, **kwargs: Any) -> list[Any]:
 
 def has_hook(hook_name: str) -> bool:
     """Return whether a first-party observer or plugin consumes a hook."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return False
     try:
         from hermes_cli.observability import handles_hook
 
