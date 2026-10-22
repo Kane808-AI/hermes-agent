@@ -123,16 +123,21 @@ def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible. An
     inert borrowed token (see _install_borrowed_lease) also lands here: present = slot held upstream."""
+    from tui_gateway.completion_inbox import start_isolated_poller
+
     if session.get("active_session_lease") is not None:
+        start_isolated_poller(sid, session)
         return None
     key = str(session.get("session_key") or "")
     lease, limit_message = _claim_active_session_slot(
         key, live_session_id=sid, surface=_session_source(session), profile_home=session.get("profile_home"))
     if limit_message is None:
         _attach_lease(session, lease)
+        start_isolated_poller(sid, session)
         return None
     from hermes_cli.active_sessions import SESSION_NOT_OWNED
     if getattr(limit_message, "reason", None) == SESSION_NOT_OWNED and _take_over_detached_runtime_lease(sid, session, key):
+        start_isolated_poller(sid, session)
         return None
     return limit_message
 
@@ -350,12 +355,39 @@ def _lock_vault_managers(session: dict) -> None:
         logging.getLogger(__name__).debug("vault manager lock on session end failed", exc_info=True)
 
 
+def _settle_completion_before_close(session: dict, end_reason: str) -> None:
+    """Stop parent-owned completion inference before teardown, with a bounded cleanup wait."""
+    with (session.get("history_lock") or contextlib.nullcontext()):
+        if not session.get("_completion_running"):
+            return
+        session["_closing"] = True
+        session["_turn_cancel_requested"] = True
+        agent = session.get("_completion_agent")
+        done = session.get("_completion_done")
+    if agent is not None:
+        from agent.memory_provider import spawn_context_thread
+
+        def interrupt():
+            # A provider abort hook may block. Neither it nor the completion may keep
+            # session.close waiting beyond the existing teardown grace.
+            with contextlib.suppress(Exception), _session_profile_runtime_scope(session, hydrate_secrets=False):
+                from agent.interrupt_compat import request_hard_interrupt
+                request_hard_interrupt(agent, f"session ended ({end_reason})", tool_reason="session ended")
+
+        spawn_context_thread(interrupt, name="tui-completion-close", daemon=True).start()
+    timeout = 0.0 if end_reason == "tui_shutdown" else _TURN_SETTLE_BEFORE_CLOSE_SECONDS
+    if done is not None and not done.wait(timeout=timeout) and timeout:
+        logger.warning("completion still running after %.1fs teardown grace for %s",
+                       timeout, session.get("session_key"))
+
+
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit; mirrors the CLI exit path so a force-quit mid-turn (double
     Ctrl-C, terminal close, SIGHUP) loses nothing."""
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
+    _settle_completion_before_close(session, end_reason)
     _lock_vault_managers(session)
     if (history_ready := session.get("resume_history_ready")) is not None and not history_ready.is_set():
         session["resume_history_error"] = "session resume cancelled"
@@ -366,6 +398,8 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     if not _desktop_automatic_cleanup:
         _release_active_session_slot(session)
     if (stop_event := session.get("_notif_stop")) is not None:
+        stop_event.set()
+    if (stop_event := session.get("_completion_stop")) is not None:
         stop_event.set()
     agent = session.get("agent")
     with (session.get("history_lock") or contextlib.nullcontext()):
@@ -694,10 +728,20 @@ def _interrupt_session_turn(
     caller, never from request_id prefix sniffing — a future orphan caller may use another id (#106678).
     """
     use_compute_host = _session_uses_compute_host(session)
-    # A manual compaction holds `running` with no run thread and its own finally releases it: Stop must not
-    # abort it nor clear `running` under it, or the next submit is admitted idle and loses its reply (#133504).
-    compressing = bool(session.get("_manual_compress_active"))
-    should_interrupt = bool(session.get("running")) and not compressing
+    with session["history_lock"]:
+        # Completion inference runs in this parent even for isolated sessions. Its poller owns
+        # admission until cleanup, independently of the previous user turn's `_run_thread`.
+        completion_running = bool(session.get("_completion_running"))
+        completion_agent = session.get("_completion_agent")
+        use_compute_host = use_compute_host and not completion_running
+        # A manual compaction holds `running` with no run thread and its own finally releases it: Stop must not
+        # abort it nor clear `running` under it, or the next submit is admitted idle and loses its reply (#133504).
+        compressing = bool(session.get("_manual_compress_active"))
+        should_interrupt = bool(session.get("running")) and not compressing
+        session["_turn_cancel_requested"] = True
+        session["queued_prompt"] = None
+        session.pop("queued_prompts", None)
+        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
     run_thread_alive = False
     if use_compute_host:
         # The host owns the live turn (parent `running` can lag a blocked tool), so let it decide. Gate on
@@ -706,11 +750,6 @@ def _interrupt_session_turn(
             _get_compute_host_supervisor().interrupt(sid, request_id=request_id)
     else:
         run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
-    with session["history_lock"]:
-        session["_turn_cancel_requested"] = True
-        session["queued_prompt"] = None
-        session.pop("queued_prompts", None)
-        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
     if should_interrupt:
         # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
         # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external
@@ -730,7 +769,7 @@ def _interrupt_session_turn(
     if not use_compute_host:
         if should_interrupt:
             from agent.interrupt_compat import request_hard_interrupt
-            request_hard_interrupt(session.get("agent"))
+            request_hard_interrupt(completion_agent if completion_running else session.get("agent"))
         # Background delegations are detached from the turn's interrupt fan-out; a stop ends them too
         # (own UI sid + spawner id only — a viewer tab must not kill gateway work). Each returns as an
         # interrupted completion with its partial output.
@@ -739,7 +778,7 @@ def _interrupt_session_turn(
             interrupt_for_session(
                 origin_ui_session_id=_lifecycle_own_sid(session, sid), reason="user_stop",
                 parent_session_id=str(getattr(session.get("agent"), "session_id", "") or ""))
-        if not run_thread_alive and not compressing:
+        if not run_thread_alive and not compressing and not completion_running:
             with session["history_lock"]:
                 if session.get("running"):
                     session["running"] = False

@@ -183,6 +183,7 @@ def _insert_decomposed_child(
     from hermes_cli.kanban_db import (
         _new_task_id, _canonical_assignee, _append_event,
     )
+    from hermes_cli.kanban_delivery import task_delivery_origin
 
     root_ws_kind = root_row["workspace_kind"] or "scratch"
     child_ws_kind = child.get("workspace_kind") or root_ws_kind
@@ -196,15 +197,17 @@ def _insert_decomposed_child(
         child_ws_path = None
     new_id = _new_task_id()
     body = child.get("body")
+    route, interactive = task_delivery_origin(conn, (), root_id)
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        " workspace_path, tenant, created_at, created_by, return_route_id, origin_interactive) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
             _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
             root_row["tenant"], now, (author or "decomposer"),
+            route, interactive,
         ),
     )
     _append_event(

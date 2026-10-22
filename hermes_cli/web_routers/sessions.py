@@ -670,6 +670,7 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     from agent.history_commentary import project_history_commentary
     from agent.prompt_builder import STEER_DISPLAY_KIND
     from agent.turn_failure_copy import untyped_failed_turn_display_kind
+    from tui_gateway.session_history import _is_completion_inbox_marker
 
     # inline_images=False (#116511): render content through the gateway's ``_coerce_message_text``
     # projection so a data-URI image part becomes ``[image]`` — the same branch session.resume's
@@ -693,7 +694,7 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
             message.get("role"), message.get("content"))
         if failed_turn:
             message = {**message, "display_kind": failed_turn}
-        if _is_untyped_scaffold_notice(message):
+        if _is_untyped_scaffold_notice(message) or _is_completion_inbox_marker(message):
             projected = message.copy()
             projected["display_kind"] = "hidden"
             projected_messages.append(projected)

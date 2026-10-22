@@ -262,7 +262,10 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
     info = _compute_host_session_info(session)
     if not frame.get("session_info_emitted"):
         _emit("session.info", sid, info)
-    _drain_queued_prompt(rid, sid, session)
+    if not _drain_queued_prompt(rid, sid, session):
+        from tui_gateway.completion_inbox import kick
+
+        kick(sid, session)
 
 
 def _submit_prompt_to_compute_host(

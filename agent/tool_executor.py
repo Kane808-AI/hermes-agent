@@ -32,6 +32,8 @@ from agent.display import (
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
+from agent.completion_inbox_output import bounded_result, bound_completion_batch
+from agent.completion_inbox_silence import is_silent
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
@@ -707,6 +709,11 @@ def _dispatch_authorized_once(
             callback()
 
     block_message, block_error_type = scope_block, "tool_scope_block"
+    from agent.completion_inbox_execution import completion_tool_rejection, dispatch_completion_tool
+    completion_result = completion_tool_rejection(ref.name)
+    if completion_result is not None:
+        _advance_start_order()
+        return completion_result
     if block_message is None:
         block_error_type = "plugin_block"
         resolve = lambda: _pre_tool_block(agent, ref)
@@ -745,6 +752,11 @@ def _dispatch_authorized_once(
         agent._turns_since_memory = 0
     elif ref.name == "skill_manage":
         agent._iters_since_skill = 0
+
+    completion_result = dispatch_completion_tool(ref.name, ref.args)
+    if completion_result is not None:
+        _advance_start_order()
+        return completion_result
 
     from agent.terminal_approval_batch import prepare_current_terminal
     prepare_current_terminal(ref)
@@ -1114,7 +1126,9 @@ def _commit_tool_result(
     agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
 
     persisted_result = function_result
-    if _is_multimodal_tool_result(persisted_result):
+    if is_silent():
+        persisted_result = bounded_result(persisted_result, budget.default_result_size)
+    elif _is_multimodal_tool_result(persisted_result):
         persisted_result = _persist_multimodal_text_parts(
             persisted_result, function_name, tool_call_id, get_active_env(effective_task_id), budget,
         )
@@ -1206,7 +1220,8 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
         return
     batch = messages[-num_tools:]
     contents_before = [message.get("content") for message in batch]
-    enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
+    if not bound_completion_batch(batch, budget):
+        enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
     record_tool_batch(agent, batch, contents_before)
     agent._apply_pending_steer_to_tool_results(messages, num_tools)
 
@@ -1566,6 +1581,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """Execute tool calls concurrently; results are appended in original call order.
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
     segmented dispatcher owns turn-end work)."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return execute_tool_calls_sequential(agent, assistant_message, messages, effective_task_id, api_call_count, finalize=finalize)
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
@@ -1703,6 +1721,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
                 session_id=agent.session_id or "",
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+                parent_agent=agent,
                 enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                 skip_pre_tool_call_hook=True,
                 skip_tool_request_middleware=True,

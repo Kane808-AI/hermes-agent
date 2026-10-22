@@ -291,6 +291,17 @@ def _db_flush_write(agent, batch_rows: list[dict[str, Any]], batch_msgs: list[di
     """One transaction for the turn's new rows: on failure nothing lands and no markers are stamped."""
     if not batch_rows:
         return
+    from agent.completion_inbox_execution import current_execution
+    completion = current_execution()
+    if completion is not None:
+        completion.validate_agent(agent)
+        committed = completion.flush(
+            batch_rows, batch_msgs, turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None),
+            compression_lock_holder=getattr(agent, "_active_compression_lock_holder", None),
+        )
+        if committed:
+            sync_flushed_message_markers(batch_msgs, batch_rows)
+        return
     agent._session_db.append_messages_batch(
         session_id=agent.session_id, messages=batch_rows,
         compression_lock_holder=getattr(agent, "_active_compression_lock_holder", None),

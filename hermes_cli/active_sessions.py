@@ -408,11 +408,217 @@ class ActiveSessionLease:
     state_path: Optional[Path] = None
     lock_path: Optional[Path] = None
     track_liveness: bool = False
+    consumer_state: Any = None
+    consumer_fence: Optional[int] = None
+    consumer_expires_at: Optional[int] = None
 
     def release(self) -> None:
         if self.released or not self.enabled:
             return
         release_active_session(self)
+
+    def activate_completion_consumer(
+        self, state, config: Any, *, live_session_id: str | None = None,
+    ) -> bool:
+        """Attach authority only to an owned, opted-in foreground lease."""
+        if self.released or not self.enabled or self.surface not in {"cli", "tui", "desktop"} \
+                or self.lease_id.startswith("borrowed:"):
+            return False
+        from hermes_cli.kanban_delivery import DeliveryPolicy
+
+        policy = DeliveryPolicy.from_config(config)
+        policy.assert_supported()
+        if not (policy.cli_enabled if self.surface == "cli" else policy.tui_enabled):
+            return False
+        state_path, lock_path = _lease_paths(self)
+        expected_home = state_path.parent.parent.resolve()
+        if Path(state.db_path).resolve().parent != expected_home:
+            raise PermissionError("consumer state store does not match the active foreground profile")
+        with _FileLock(lock_path):
+            owned = _require_owned_registry_entry(self, state_path)
+            if live_session_id is not None \
+                    and str((owned.get("metadata") or {}).get("live_session_id") or "") != live_session_id:
+                raise PermissionError("completion consumer belongs to another live runtime")
+            authority = state.acquire_kanban_cli_consumer(
+                self.session_id, self.lease_id, surface=self.surface
+            )
+            self.consumer_state = state
+            self.consumer_fence = int(authority["consumer_fence"])
+            self.consumer_expires_at = int(authority["lease_expires_at"])
+        return True
+
+    def heartbeat_completion_consumer(self) -> bool:
+        """Renew the exact authority, or reacquire with a new fence after expiry."""
+        if self.released or self.consumer_state is None or self.consumer_fence is None:
+            return False
+        state_path, lock_path = _lease_paths(self)
+        with _FileLock(lock_path):
+            _require_owned_registry_entry(self, state_path)
+            if self.consumer_state is None or self.consumer_fence is None:
+                return False
+            authority = self.consumer_state.renew_kanban_cli_consumer(
+                self.session_id, self.lease_id, self.consumer_fence, surface=self.surface
+            )
+            if authority is None:
+                authority = self.consumer_state.acquire_kanban_cli_consumer(
+                    self.session_id, self.lease_id, surface=self.surface
+                )
+            self.consumer_fence = int(authority["consumer_fence"])
+            self.consumer_expires_at = int(authority["lease_expires_at"])
+        return True
+
+    @contextmanager
+    def completion_authority_guard(self):
+        """Keep registry ownership pinned through an inbox authority transition."""
+        from hermes_state_kanban import _KANBAN_ROUTE_SOURCES, process_identity
+
+        if self.state_path is None or self.lock_path is None:
+            raise PermissionError("completion consumer has no pinned registry")
+        with _FileLock(self.lock_path):
+            owned = _require_owned_registry_entry(self, self.state_path)
+            state = self.consumer_state
+            if state is None or self.consumer_fence is None:
+                raise PermissionError("completion consumer is not bound")
+            if Path(state.db_path).resolve().parent != self.state_path.parent.parent.resolve():
+                raise PermissionError("consumer state store does not match the active foreground profile")
+            pid, started = process_identity()
+            current = state._read_one(
+                "SELECT c.*,s.source FROM kanban_session_consumers c JOIN sessions s "
+                "ON s.id=c.session_id AND s.started_at=c.session_started_at WHERE c.session_id=?",
+                (self.session_id,),
+            )
+            if current is None or current["lease_owner"] != self.lease_id \
+                    or current["consumer_fence"] != self.consumer_fence \
+                    or self.consumer_fence < 1 \
+                    or current["owner_pid"] != pid or current["owner_started_at"] != started \
+                    or (current["lease_expires_at"] or 0) <= time.time() \
+                    or str(current["source"] or "").lower() not in _KANBAN_ROUTE_SOURCES[self.surface]:
+                raise PermissionError("completion consumer authority is absent, expired or superseded")
+            yield owned
+
+    def release_completion_consumer(self, *, live_session_id: str | None = None) -> None:
+        """Detach the durable consumer while retaining this foreground session slot."""
+        if self.consumer_state is None or self.consumer_fence is None:
+            return
+        state_path, lock_path = _lease_paths(self)
+        with _FileLock(lock_path):
+            self._release_completion_consumer_locked(state_path, live_session_id=live_session_id)
+
+    def _release_completion_consumer_locked(
+        self, state_path: Path, *, live_session_id: str | None = None,
+    ) -> None:
+        if self.consumer_state is None or self.consumer_fence is None:
+            return
+        successor_binding = False
+        try:
+            owned = _require_owned_registry_entry(self, state_path)
+            if live_session_id is not None \
+                    and str((owned.get("metadata") or {}).get("live_session_id") or "") != live_session_id:
+                successor_binding = True
+                return
+            self.consumer_state.release_kanban_cli_consumer(
+                self.session_id, self.lease_id, self.consumer_fence
+            )
+        except Exception:
+            logger.warning(
+                "Failed to release durable completion consumer for session %s; "
+                "the short lease will expire",
+                self.session_id,
+                exc_info=True,
+            )
+        finally:
+            if not successor_binding:
+                self.consumer_state = None
+                self.consumer_fence = None
+                self.consumer_expires_at = None
+
+
+@dataclass
+class GatewayCompletionConsumerLease:
+    """Profile-pinned gateway authority for one immutable completion route."""
+
+    state: Any
+    route_id: str
+    board_uuid: str
+    lease_owner: str
+    session_id: str
+    surface: str
+    lineage: tuple[str, ...]
+    consumer_fence: int
+    consumer_expires_at: int
+    state_path: Path
+    lock_path: Path
+    released: bool = False
+
+    def _verified_lineage(self) -> dict:
+        resolved = self.state.resolve_kanban_completion_lineage(
+            self.route_id, self.board_uuid
+        )
+        if resolved["session_id"] != self.session_id \
+                or tuple(resolved["lineage"]) != self.lineage \
+                or resolved["surface"] != self.surface:
+            raise PermissionError("gateway completion route lineage changed")
+        return resolved
+
+    @contextmanager
+    def authority_guard(self):
+        """Exclude foreground owners while a gateway transition validates its fence."""
+        if self.released:
+            raise PermissionError("gateway completion consumer is released")
+        with _FileLock(self.lock_path):
+            resolved = self._verified_lineage()
+            loaded = _read_live_entries(
+                self.state_path,
+                track_liveness=True,
+                warn="",
+                target_session_id=resolved["session_id"],
+            )
+            if loaded is None:
+                raise ActiveSessionRegistryError("active session registry is unavailable")
+            raw, entries = loaded
+            if entries != raw:
+                _write_entries(self.state_path, entries)
+            lineage = set(resolved["lineage"])
+            if any(
+                str(entry.get("session_id") or "") in lineage
+                and str(entry.get("surface") or "").lower() in {"cli", "tui", "desktop"}
+                for entry in entries
+            ):
+                raise PermissionError("a valid foreground session lease exists")
+            yield
+
+    def heartbeat_completion_consumer(self) -> bool:
+        if self.released:
+            return False
+        with self.authority_guard():
+            authority = self.state.renew_kanban_gateway_consumer(
+                self.route_id,
+                self.board_uuid,
+                self.lease_owner,
+                self.consumer_fence,
+            )
+            if authority is None:
+                authority = self.state.acquire_kanban_gateway_consumer(
+                    self.route_id, self.board_uuid, self.lease_owner
+                )
+            if authority is None:
+                return False
+            if authority["session_id"] != self.session_id \
+                    or tuple(authority["lineage"]) != self.lineage:
+                raise PermissionError("gateway completion authority moved to another lineage")
+            self.consumer_fence = int(authority["consumer_fence"])
+            self.consumer_expires_at = int(authority["lease_expires_at"])
+            return True
+
+    def release(self) -> None:
+        if self.released:
+            return
+        try:
+            self.state.release_kanban_gateway_consumer(
+                self.session_id, self.lease_owner, self.consumer_fence
+            )
+        finally:
+            self.released = True
 
 
 def _clean_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -427,6 +633,41 @@ def _drop_lease(
     if len(kept) != len(entries):
         _write_entries(state_path, kept)
     return kept
+
+
+def _require_owned_registry_entry(
+    lease: ActiveSessionLease, state_path: Path
+) -> dict[str, Any]:
+    """Return the exact live registry row or fail closed."""
+    if lease.released or not lease.enabled or lease.surface not in {"cli", "tui", "desktop"} \
+            or lease.lease_id.startswith("borrowed:"):
+        raise PermissionError("foreground no longer owns the active session")
+    loaded = _read_live_entries(
+        state_path,
+        track_liveness=True,
+        warn="",
+        target_session_id=lease.session_id,
+    )
+    if loaded is None:
+        raise ActiveSessionRegistryError("active session registry is unavailable")
+    own = next(
+        (
+            entry
+            for entry in loaded[1]
+            if str(entry.get("lease_id") or "") == lease.lease_id
+        ),
+        None,
+    )
+    if (
+        own is None
+        or str(own.get("session_id") or "") != lease.session_id
+        or str(own.get("surface") or "") != lease.surface
+        or _registry_pid(own.get("pid")) != os.getpid()
+        or _optional_float(own.get("process_start_time")) is None
+        or not _pid_liveness(own.get("pid"), own.get("process_start_time"))
+    ):
+        raise PermissionError("foreground no longer owns the active session")
+    return own
 
 
 def _holds_session(entries: list[dict[str, Any]], session_id: str) -> bool:
@@ -456,6 +697,66 @@ def _read_live_entries(
             raise
         logger.warning(warn)
         return None
+
+
+def acquire_gateway_completion_consumer(
+    state,
+    route_id: str,
+    board_id: str,
+    config: Any,
+    *,
+    registry_home: str | Path | None = None,
+) -> Optional[GatewayCompletionConsumerLease]:
+    """Claim a route-derived gateway consumer only while its foreground is absent."""
+    from hermes_cli.kanban_delivery import DeliveryPolicy
+
+    policy = DeliveryPolicy.from_config(config)
+    policy.assert_supported()
+    if not policy.gateway_enabled:
+        return None
+    state_path, lock_path = _lease_paths(registry_home=registry_home)
+    expected_home = state_path.parent.parent.resolve()
+    if Path(state.db_path).resolve().parent != expected_home:
+        raise PermissionError("gateway consumer state store does not match the owning profile")
+    lease_owner = f"gateway:{uuid.uuid4().hex}"
+    with _FileLock(lock_path):
+        resolved = state.resolve_kanban_completion_lineage(route_id, board_id)
+        loaded = _read_live_entries(
+            state_path,
+            track_liveness=True,
+            warn="",
+            target_session_id=resolved["session_id"],
+        )
+        if loaded is None:
+            raise ActiveSessionRegistryError("active session registry is unavailable")
+        raw, entries = loaded
+        if entries != raw:
+            _write_entries(state_path, entries)
+        lineage = set(resolved["lineage"])
+        if any(
+            str(entry.get("session_id") or "") in lineage
+            and str(entry.get("surface") or "").lower() in {"cli", "tui", "desktop"}
+            for entry in entries
+        ):
+            raise PermissionError("a valid foreground session lease exists")
+        authority = state.acquire_kanban_gateway_consumer(
+            route_id, board_id, lease_owner
+        )
+        if authority is None:
+            return None
+    return GatewayCompletionConsumerLease(
+        state=state,
+        route_id=route_id,
+        board_uuid=board_id,
+        lease_owner=lease_owner,
+        session_id=str(authority["session_id"]),
+        surface=str(authority["surface"]),
+        lineage=tuple(authority["lineage"]),
+        consumer_fence=int(authority["consumer_fence"]),
+        consumer_expires_at=int(authority["lease_expires_at"]),
+        state_path=state_path,
+        lock_path=lock_path,
+    )
 
 
 def _lease_entry(
@@ -582,6 +883,7 @@ def release_active_session(lease: ActiveSessionLease) -> None:
     with _FileLock(lock_path):
         if lease.released:
             return
+        lease._release_completion_consumer_locked(state_path)
         loaded = _read_live_entries(
             state_path, track_liveness=lease.track_liveness,
             warn="Active-session registry is unavailable; preserving it while "
@@ -610,6 +912,11 @@ def transfer_active_session(
         # thread acquired the file lock. Never resurrect a durably removed lease.
         if lease.released:
             return False
+        if lease.consumer_state is not None and lease.consumer_fence is not None:
+            try:
+                _require_owned_registry_entry(lease, state_path)
+            except (PermissionError, ActiveSessionRegistryError):
+                return False
         loaded = _read_live_entries(
             state_path, track_liveness=lease.track_liveness,
             warn="Active-session registry is unavailable; refusing to overwrite "
@@ -621,10 +928,56 @@ def transfer_active_session(
         entries = loaded[1]
         own = next((e for e in entries if str(e.get("lease_id") or "") == lease.lease_id), None)
         if own is not None:
+            new_authority = None
+            old_session_id = lease.session_id
+            old_fence = lease.consumer_fence
+            if lease.consumer_state is not None and old_fence is not None \
+                    and old_session_id != new_session_id:
+                try:
+                    if lease.consumer_state.get_compression_tip(old_session_id) == new_session_id:
+                        new_authority = lease.consumer_state.transfer_kanban_cli_consumer(
+                            old_session_id,
+                            new_session_id,
+                            lease.lease_id,
+                            old_fence,
+                            surface=lease.surface,
+                        )
+                        if new_authority is None:
+                            raise PermissionError("stale completion consumer authority")
+                    else:
+                        new_authority = lease.consumer_state.acquire_kanban_cli_consumer(
+                            new_session_id, lease.lease_id, surface=lease.surface
+                        )
+                except Exception:
+                    logger.warning(
+                        "Refused completion consumer transfer from %s to %s",
+                        old_session_id,
+                        new_session_id,
+                        exc_info=True,
+                    )
+                    return False
             own["session_id"] = new_session_id
             own["updated_at"] = time.time()
             if metadata:
                 own["metadata"] = _clean_metadata(metadata)
+            try:
+                _write_entries(state_path, entries)
+            except BaseException:
+                if new_authority is not None:
+                    with suppress(Exception):
+                        lease.consumer_state.release_kanban_cli_consumer(
+                            new_session_id,
+                            lease.lease_id,
+                            int(new_authority["consumer_fence"]),
+                        )
+                raise
+            if new_authority is not None:
+                with suppress(Exception):
+                    lease.consumer_state.release_kanban_cli_consumer(
+                        old_session_id, lease.lease_id, old_fence
+                    )
+                lease.consumer_fence = int(new_authority["consumer_fence"])
+                lease.consumer_expires_at = int(new_authority["lease_expires_at"])
         elif lease.track_liveness:
             entries.append(_lease_entry(
                 lease_id=lease.lease_id, session_id=new_session_id, surface=lease.surface,
@@ -632,7 +985,8 @@ def transfer_active_session(
             ))
         else:
             return False
-        _write_entries(state_path, entries)
+        if own is None:
+            _write_entries(state_path, entries)
         lease.session_id = new_session_id
         return True
 

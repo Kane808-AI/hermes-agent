@@ -58,6 +58,59 @@ class CLITuiRuntimeMixin:
         ):
             with suppress(Exception):
                 step()
+        self._maybe_poll_completion_inbox("cli-idle")
+
+    def _maybe_poll_completion_inbox(self, source: str, *, force: bool = False) -> int:
+        """Rate-limit idle polls while keeping failures visible and retryable."""
+        now = time.monotonic()
+        if not force and now < getattr(self, "_completion_inbox_next_poll", 0.0):
+            return 0
+        self._completion_inbox_next_poll = now + 2.0
+        try:
+            from hermes_cli.cli_completion_consumer import poll_completion_inbox
+
+            consumed = poll_completion_inbox(self)
+            self._completion_inbox_last_error = None
+            return consumed
+        except Exception as exc:  # health: allow BLE001 -- keep the prompt alive and show every consumer failure
+            signature = f"{type(exc).__name__}: {exc}"
+            if signature != getattr(self, "_completion_inbox_last_error", None):
+                self._completion_inbox_last_error = signature
+                try:
+                    self._console_print(
+                        f"[bold red]Completion inbox error ({source}): {_escape(str(exc))}[/]"
+                    )
+                except Exception:
+                    logger.exception("Completion inbox error display failed (%s)", source)
+            logger.warning("Completion inbox poll failed (%s): %s", source, exc, exc_info=True)
+            return 0
+
+    def _present_completion_inbox_response(self, response) -> None:
+        """Render only the committed receipt, after silent execution has ended."""
+        from cli import ChatConsole, _maybe_remap_for_light_mode, _render_final_assistant_content
+        from rich import box
+        from rich.panel import Panel
+
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            skin = get_active_skin()
+            border = _maybe_remap_for_light_mode(skin.get_color("response_border", "#CD7F32"))
+            text = _maybe_remap_for_light_mode(skin.get_color("banner_text", "#FFF8DC"))
+        except (ImportError, AttributeError, KeyError, TypeError, ValueError):
+            border = _maybe_remap_for_light_mode("#CD7F32")
+            text = _maybe_remap_for_light_mode("#FFF8DC")
+        ChatConsole().print(Panel(
+            _render_final_assistant_content(str(response), mode=self.final_response_markdown),
+            title=f"[{border} bold]☤ Hermes · Kanban[/]",
+            title_align="left",
+            border_style=border,
+            style=text,
+            box=box.HORIZONTALS,
+            padding=(1, 0),
+            width=self._scrollback_box_width(),
+        ))
+        with suppress(Exception):
+            self._app.invalidate()
 
     def _tui_process_one_input(self, user_input):
         """Route one submitted input: file drop, /resume pick, ! shell, slash command, or a chat turn."""
@@ -193,6 +246,7 @@ class CLITuiRuntimeMixin:
 
         with suppress(Exception):
             self._drain_process_notifications("cli-post-turn")
+        self._maybe_poll_completion_inbox("cli-post-turn", force=True)
 
     def _tui_signal_handler(self, signum, frame):
         """SIGHUP/SIGTERM -> graceful shutdown.

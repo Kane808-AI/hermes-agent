@@ -57,6 +57,52 @@ _CONTROL_FAILURES = {
     "session.save": "session save failed", "session.compress": "session compression failed"}
 
 
+def _refresh_completion_history(server, session: dict, frame: dict) -> None:
+    """A reused isolated child reloads receipts committed by its foreground parent."""
+    from tui_gateway.completion_inbox import _refresh, enabled
+
+    if session.get("source") not in {"tui", "desktop"}:
+        return
+    with server._session_profile_runtime_scope(session):
+        if not enabled(session, server._load_cfg()):
+            return
+        lease = session.get("active_session_lease")
+        vouch = frame.get("active_session_lease")
+        target = str(frame.get("session_key") or "")
+        if lease is None or lease.enabled or lease.released or not isinstance(vouch, dict) \
+                or lease.lease_id != f"borrowed:{vouch.get('lease_id') or ''}" \
+                or str(vouch.get("session_id") or "") != target \
+                or lease.surface != session.get("source") \
+                or frame.get("source") != session.get("source"):
+            raise PermissionError("completion history requires the current parent's borrowed lease")
+        agent = session.get("agent")
+        agent_db = getattr(agent, "_session_db", None)
+        if agent_db is None:
+            raise PermissionError("completion history requires the child's pinned session store")
+        incoming_home = frame.get("profile_home")
+        if incoming_home and Path(incoming_home).resolve() != Path(agent_db.db_path).resolve().parent:
+            raise PermissionError("completion history cannot change the child's profile")
+        with session["history_lock"], server._session_db(session) as state:
+            if session.get("running"):
+                raise PermissionError("completion history cannot replace an active child turn")
+            if state is None or Path(state.db_path).resolve() != Path(agent_db.db_path).resolve():
+                raise PermissionError("completion history session store changed profile")
+            key = str(session.get("session_key") or "")
+            if not target or state.get_compression_tip(key) != target:
+                raise PermissionError("completion history target is not the canonical compression tip")
+            with state._read_ctx() as conn:
+                lineage = state._kanban_cli_compression_lineage_on_conn(
+                    conn, target, surface=lease.surface
+                )
+            if key not in lineage:
+                raise PermissionError("completion history lineage changed interactive surface")
+            stored = state.get_session(target)
+            from hermes_state_kanban import _KANBAN_ROUTE_SOURCES
+            if stored is None or stored.get("source") not in _KANBAN_ROUTE_SOURCES[lease.surface]:
+                raise PermissionError("completion history target changed interactive surface")
+            _refresh(session, state, lease, force=True)
+
+
 class ComputeHost:
     # frame ``type`` -> handler method name (resolved per call so monkeypatches take effect).
     _FRAME_HANDLERS: dict[str, str] = {
@@ -315,6 +361,7 @@ class ComputeHost:
         sid = str(frame.get("sid") or "")
         session = server._sessions.get(sid)
         if session is not None:
+            _refresh_completion_history(server, session, frame)
             session["transport"] = self._transport
             if frame.get("cols") is not None:
                 session["cols"] = int(frame.get("cols") or 80)

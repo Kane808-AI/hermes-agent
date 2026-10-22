@@ -650,6 +650,12 @@ def _lock_in_submit_turn(
     with _session_turn_admission(session) as admitted:
         if not admitted:
             return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
+        from tui_gateway.completion_inbox import prepare_local_turn
+
+        try:
+            prepare_local_turn(sid, session)
+        except Exception as exc:  # health: allow BLE001 -- fail closed before staging user input and return the RPC error
+            return _err(rid, 5071, f"Completion ownership refresh failed: {exc}"), fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
         # mid-run would build a second agent racing the child on the same stored session.
         if session.get("lazy") and _child_run_active(

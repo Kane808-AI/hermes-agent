@@ -71,6 +71,8 @@ def _scrub_local_state(conn: sqlite3.Connection) -> None:
     """Strip machine-local runtime state (claims, PIDs, and above all the
     gateway chat ids subscribed to task events). Caller owns the transaction.
     Run on export and again on import (an archive is untrusted input)."""
+    from hermes_cli.kanban_delivery_schema import reset_transferred_delivery_state
+    reset_transferred_delivery_state(conn)
     conn.execute("DELETE FROM kanban_notify_subs")
     conn.execute(
         """

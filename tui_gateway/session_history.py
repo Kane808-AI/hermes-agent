@@ -282,6 +282,18 @@ _HISTORY_ASSISTANT_DETAIL_KEYS = (
 _HISTORY_ROLES = frozenset({"user", "assistant", "tool", "system"})
 
 
+def _is_completion_inbox_marker(message: dict) -> bool:
+    """Hide the internal wake-up row without hiding its committed assistant response."""
+    metadata = message.get("display_metadata")
+    completion = metadata.get("completion_inbox") if isinstance(metadata, dict) else None
+    return (
+        message.get("role") == "user"
+        and message.get("display_kind") == "completion_inbox"
+        and isinstance(completion, dict)
+        and completion.get("kind") == "marker"
+    )
+
+
 def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: bool = True) -> list[dict]:
     """``image_urls=False`` is the ``inline_images=false`` projection (#116511): image parts render ``[image]``
     so a remote client's history read stays kilobytes instead of re-transmitting every stored attachment."""
@@ -297,7 +309,7 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
             continue
         role = m.get("role")
         # display_kind="hidden": model-facing scaffolding the "[System:" sniff does not catch.
-        if role not in _HISTORY_ROLES or m.get("display_kind") == "hidden":
+        if role not in _HISTORY_ROLES or m.get("display_kind") == "hidden" or _is_completion_inbox_marker(m):
             continue
         content_text = _user_image_display_text(m.get("content")) if role == "user" else None
         if content_text is None:

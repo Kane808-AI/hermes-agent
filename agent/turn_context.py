@@ -197,6 +197,9 @@ def _maybe_title_session_at_turn_start(
     agent: Any, messages: list[Any], title_user_message: Optional[str] = None,
 ) -> None:
     """Kick off auto-titling for the session's first user message; never fatal."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     session_db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", None)
     if not session_db or not session_id:
@@ -269,6 +272,9 @@ def _maybe_title_session_at_turn_start(
 
 def start_deferred_title_upgrade(agent: Any) -> None:
     """Fire the title upgrade ``_maybe_title_session_at_turn_start`` held back; no-op when none."""
+    from agent.completion_inbox_silence import is_silent
+    if is_silent():
+        return
     upgrade = getattr(agent, "_deferred_title_upgrade", None)
     if upgrade is None:
         return
@@ -551,6 +557,9 @@ def _refresh_mcp_tools_between_turns(agent: Any) -> None:
     """Late-connecting MCP servers land in THIS turn's snapshot, before the first API
     call assembles ``tools=``. ``preserve_prefix`` keeps the tool array append-only so a
     flapping ``check_fn`` can't fork the cache."""
+    from agent.completion_inbox_execution import current_execution
+    if current_execution() is not None:
+        return
     try:
         # An authorization that committed after its connection card closed: same import-cost gate,
         # the module is loaded only in a process that ran a connection operation.
@@ -1111,8 +1120,15 @@ def build_turn_context(
     # Every estimator this turn prices images at the cost learned from this model's real usage.
     bind_image_token_cost(agent)
     # Append the user message now that close persistence is safe.
-    append_message(messages, user_msg)
-    current_turn_user_idx = len(messages) - 1
+    from agent.completion_inbox_execution import current_execution
+    completion = current_execution()
+    if completion is None:
+        append_message(messages, user_msg)
+        current_turn_user_idx = len(messages) - 1
+    else:
+        current_turn_user_idx = completion.marker_index(agent, messages)
+        user_msg = messages[current_turn_user_idx]
+        pending_cli_message = None
     agent._persist_user_message_idx = current_turn_user_idx
 
     agent._user_turn_count += 1
