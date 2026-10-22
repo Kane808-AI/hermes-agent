@@ -581,7 +581,7 @@ class GatewayCompletionConsumerLease:
             lineage = set(resolved["lineage"])
             if any(
                 str(entry.get("session_id") or "") in lineage
-                and str(entry.get("surface") or "").lower() in {"cli", "tui", "desktop"}
+                and str(entry.get("surface") or "").lower() in {"cli", "tui", "desktop", "telegram"}
                 for entry in entries
             ):
                 raise PermissionError("a valid foreground session lease exists")

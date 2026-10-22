@@ -64,7 +64,7 @@ def test_copied_profile_database_cannot_resolve_original_route(tmp_path):
         assert clone.resolve_kanban_return_route(route, "board") is None
 
 
-@pytest.mark.parametrize("surface,source", [("cli", "cli"), ("tui", "tui"), ("desktop", "tui")])
+@pytest.mark.parametrize("surface,source", [("cli", "cli"), ("tui", "tui"), ("desktop", "tui"), ("telegram", "telegram")])
 def test_trusted_storage_accepts_interactive_surface(tmp_path, surface, source):
     with contextlib.closing(SessionDB(tmp_path / "state.db")) as db:
         db.create_session("s", source=source)

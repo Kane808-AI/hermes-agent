@@ -110,6 +110,7 @@ class CompletionInbox:
                 "cli": {"cli"},
                 "tui": {"tui"},
                 "desktop": {"tui", "desktop"},
+                "telegram": {"telegram"},
             }.get(self.route["surface"], set())
             rows = conn.execute(
                 f"SELECT id,source,started_at FROM sessions WHERE id IN "

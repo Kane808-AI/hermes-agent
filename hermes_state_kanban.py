@@ -7,12 +7,13 @@ import uuid
 
 from hermes_cli.sqlite_migration_backup import migration_backup
 
-KANBAN_ROUTE_SCHEMA_VERSION = 1
+KANBAN_ROUTE_SCHEMA_VERSION = 2
 KANBAN_CONSUMER_LEASE_SECONDS = 30
 _KANBAN_ROUTE_SOURCES = {
     "cli": frozenset({"cli"}),
     "tui": frozenset({"tui"}),
     "desktop": frozenset({"tui", "desktop"}),
+    "telegram": frozenset({"telegram"}),
 }
 KANBAN_ROUTE_SCHEMA_SQL = """
 BEGIN IMMEDIATE;
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS kanban_return_routes (
     session_id TEXT NOT NULL,
     session_started_at REAL NOT NULL,
     owner_state_path TEXT NOT NULL,
-    surface TEXT NOT NULL CHECK(surface IN ('cli','tui','desktop')),
+    surface TEXT NOT NULL CHECK(surface IN ('cli','tui','desktop','telegram')),
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kanban_routes_session ON kanban_return_routes(session_id);
@@ -57,7 +58,7 @@ CREATE TABLE IF NOT EXISTS kanban_session_consumers (
 );
 CREATE TRIGGER IF NOT EXISTS kanban_return_route_immutable BEFORE UPDATE ON kanban_return_routes
 BEGIN SELECT RAISE(ABORT, 'return route is immutable'); END;
-INSERT OR IGNORE INTO kanban_route_schema VALUES (1,1);
+INSERT OR IGNORE INTO kanban_route_schema VALUES (1,2);
 COMMIT;
 """
 
@@ -65,7 +66,32 @@ COMMIT;
 def prepare_route_migration(conn, path) -> None:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_route_schema'").fetchone():
         row = conn.execute("SELECT version FROM kanban_route_schema WHERE singleton=1").fetchone()
-        if row is None or row[0] != KANBAN_ROUTE_SCHEMA_VERSION:
+        if row is None:
+            raise RuntimeError("incompatible Kanban return-route schema")
+        if row[0] == 1:
+            migration_backup(conn, path, "kanban-routes-v2")
+            conn.executescript("""
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS kanban_return_route_immutable;
+                ALTER TABLE kanban_return_routes RENAME TO kanban_return_routes_v1;
+                CREATE TABLE kanban_return_routes (
+                    return_route_id TEXT PRIMARY KEY,
+                    board_uuid TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    session_started_at REAL NOT NULL,
+                    owner_state_path TEXT NOT NULL,
+                    surface TEXT NOT NULL CHECK(surface IN ('cli','tui','desktop','telegram')),
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO kanban_return_routes SELECT * FROM kanban_return_routes_v1;
+                DROP TABLE kanban_return_routes_v1;
+                CREATE INDEX IF NOT EXISTS idx_kanban_routes_session ON kanban_return_routes(session_id);
+                CREATE TRIGGER kanban_return_route_immutable BEFORE UPDATE ON kanban_return_routes
+                BEGIN SELECT RAISE(ABORT, 'return route is immutable'); END;
+                UPDATE kanban_route_schema SET version=2 WHERE singleton=1;
+                COMMIT;
+            """)
+        elif row[0] != KANBAN_ROUTE_SCHEMA_VERSION:
             raise RuntimeError("incompatible Kanban return-route schema")
         consumers = {r[1] for r in conn.execute("PRAGMA table_info(kanban_session_consumers)")}
         owners = conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_return_route_owners'").fetchone()
@@ -112,13 +138,12 @@ class SessionKanbanRoutesMixin:
     ) -> str:
         """Native orchestrator API. Surface capture is wired in Phase 3, never from tool args."""
         assert_trusted_route_writer()
-        if not interactive or surface not in {"cli", "tui", "desktop"} or not board_uuid:
+        if not interactive or surface not in _KANBAN_ROUTE_SOURCES or not board_uuid:
             raise ValueError("return routes require an eligible interactive origin")
         route_id = uuid.uuid4().hex
         def create(conn):
             row = conn.execute("SELECT source,started_at FROM sessions WHERE id=?", (session_id,)).fetchone()
-            sources = {"cli": {"cli"}, "tui": {"tui"}, "desktop": {"tui", "desktop"}}
-            if row is None or row[0] not in sources[surface]:
+            if row is None or row[0] not in _KANBAN_ROUTE_SOURCES[surface]:
                 raise ValueError("return-route session does not belong to this interactive surface")
             version = conn.execute("SELECT version FROM kanban_route_schema WHERE singleton=1").fetchone()
             if version is None or version[0] != KANBAN_ROUTE_SCHEMA_VERSION:

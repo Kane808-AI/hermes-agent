@@ -34,7 +34,7 @@ def _route_map(state) -> dict[str, str]:
     rows = state._read_all(
         "SELECT r.return_route_id,r.board_uuid FROM kanban_return_routes r "
         "JOIN sessions s ON s.id=r.session_id AND s.started_at=r.session_started_at "
-        "WHERE r.owner_state_path=? AND r.surface IN ('cli','tui','desktop')",
+        "WHERE r.owner_state_path=? AND r.surface IN ('cli','tui','desktop','telegram')",
         (str(Path(state.db_path).resolve()),),
     )
     return {str(row["return_route_id"]): str(row["board_uuid"]) for row in rows}

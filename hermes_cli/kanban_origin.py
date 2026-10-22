@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
-_ELIGIBLE_SURFACES = frozenset({"cli", "tui", "desktop"})
+_ELIGIBLE_SURFACES = frozenset({"cli", "tui", "desktop", "telegram"})
 _INELIGIBLE_SESSION_SOURCES = frozenset({
     "acp", "cron", "kanban", "oneshot", "subagent", "tool",
 })
@@ -13,6 +13,7 @@ _SESSION_SOURCES_BY_SURFACE = {
     "cli": frozenset({"cli"}),
     "tui": frozenset({"tui"}),
     "desktop": frozenset({"desktop", "tui"}),
+    "telegram": frozenset({"telegram"}),
 }
 
 

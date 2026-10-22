@@ -89,7 +89,7 @@ def _route_for_task(world, task_id: str):
 
 @pytest.mark.parametrize(
     ("surface", "source"),
-    (("cli", "cli"), ("tui", "tui"), ("desktop", "desktop")),
+    (("cli", "cli"), ("tui", "tui"), ("desktop", "desktop"), ("telegram", "telegram")),
 )
 def test_eligible_interactive_roots_capture_opaque_route(origin_world, surface, source):
     origin_world.state.create_session("live", source=source)
