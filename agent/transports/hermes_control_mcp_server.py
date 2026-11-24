@@ -1,6 +1,6 @@
-"""Small, profile-pinned MCP surface for Orca bots to use Hermes Research and Kanban.
+"""Profile-pinned MCP surface for Hermes Research and Kanban clients.
 
-Run as ``python -m agent.transports.orca_hermes_bridge``. One server process serves one
+Run as ``python -m agent.transports.hermes_control_mcp_server``. One server process serves one
 Hermes profile and an explicit set of boards; the existing Hermes dispatcher owns work.
 """
 
@@ -21,7 +21,7 @@ def _safe_text(value: Any) -> str:
     return redact_sensitive_text(str(value), force=True, redact_url_credentials=True)
 
 
-class OrcaHermesBridge:
+class HermesControlBridge:
     def __init__(self, profile_home: Path, boards: list[str], assignees: list[str] | None = None):
         from hermes_cli import kanban_db as kb
 
@@ -141,7 +141,7 @@ class OrcaHermesBridge:
             raise ValueError("idempotency_key must contain 1 to 160 characters")
         with connect_closing(board=board) as conn:
             task_id = kb.create_task(conn, title=title, body=body, assignee=assignee,
-                    created_by=f"orca:{self.profile_home.name}", idempotency_key=idempotency_key,
+                    created_by=f"mcp:{self.profile_home.name}", idempotency_key=idempotency_key,
                     max_runtime_seconds=900, board=board)
             task = kb.get_task(conn, task_id)
         return {"board": board, "task_id": task_id, "status": task.status,
@@ -175,16 +175,16 @@ class OrcaHermesBridge:
         with connect_closing(board=board) as conn:
             if kb.get_task(conn, task_id) is None:
                 raise ValueError("task not found on selected board")
-            comment_id = kb.add_comment(conn, task_id, f"orca:{self.profile_home.name}", body)
+            comment_id = kb.add_comment(conn, task_id, f"mcp:{self.profile_home.name}", body)
         return {"board": board, "task_id": task_id, "comment_id": comment_id}
 
 
-def build_server(bridge: OrcaHermesBridge):
+def build_server(bridge: HermesControlBridge):
     from mcp.server import MCPServer
 
-    server = MCPServer("orca-hermes-bridge", instructions=(
+    server = MCPServer("hermes-control-mcp", instructions=(
         "Use explicit board names. Research is one bounded Hermes turn. Kanban creation returns a "
-        "task ID; check kanban_task_status for the Hermes worker result. No Orca push wake is installed."))
+        "task ID; check kanban_task_status for the Hermes worker result. No client push wake is installed."))
     for name in ("abilities_list", "ability_view", "research_run", "kanban_boards",
                  "kanban_tasks", "kanban_create", "kanban_task_status", "kanban_comment"):
         server.add_tool(getattr(bridge, name), name=name)
@@ -203,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["HERMES_HOME"] = str(args.profile_home.expanduser().resolve())
     os.environ["HERMES_REDACT_SECRETS"] = "true"
     os.environ["HERMES_QUIET"] = "1"
-    bridge = OrcaHermesBridge(args.profile_home, args.allow_board, args.allow_assignee)
+    bridge = HermesControlBridge(args.profile_home, args.allow_board, args.allow_assignee)
     build_server(bridge).run()
     return 0
 

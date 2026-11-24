@@ -1,11 +1,11 @@
-"""Behavior contracts for Orca's narrow Hermes adapter."""
+"""Behavior contracts for the scoped Hermes MCP server."""
 
 import json
 import subprocess
 
 import pytest
 
-from agent.transports.orca_hermes_bridge import OrcaHermesBridge, build_server
+from agent.transports.hermes_control_mcp_server import HermesControlBridge, build_server
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def bridge(tmp_path, monkeypatch):
 
     kb.create_board("fixture_research")
     kb.create_board("other_entity")
-    return OrcaHermesBridge(home, ["fixture_research"], ["research"])
+    return HermesControlBridge(home, ["fixture_research"], ["research"])
 
 
 def test_fixture_board_create_and_result_path(bridge):

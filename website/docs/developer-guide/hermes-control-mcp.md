@@ -1,23 +1,23 @@
-# Orca to Hermes bridge
+# Hermes control MCP server
 
-The Orca bridge is a local stdio MCP server. It uses the existing Hermes Research profile for one bounded agent turn and the existing shared Kanban database for board work. Hermes keeps ownership of dispatch, cron, heartbeat, retries, and worker completion.
+The Hermes control bridge is a local stdio MCP server. It uses the existing Hermes Research profile for one bounded agent turn and the existing shared Kanban database for board work. Hermes keeps ownership of dispatch, cron, heartbeat, retries, and worker completion.
 
-## Start and attach
+## Start
 
-After this change is present in the Hermes checkout Orca will use, start it with:
+After this change is present in the Hermes checkout the client will use, start it with:
 
 ```sh
-/Users/chriskaneshiro/.hermes/hermes-agent/scripts/orca-hermes-bridge \
+/Users/chriskaneshiro/.hermes/hermes-agent/scripts/hermes-control-mcp \
   --profile-home /Users/chriskaneshiro/.hermes/profiles/research \
   --allow-board sandbox-pilot-20261114 \
   --allow-assignee research
 ```
 
-The script starts the checkout's pinned Python environment and runs the MCP server on stdio. Orca starts and stops the process when it uses the tool. To attach it to both existing bots, Atlas runs the following outside the development worktree, after the code is installed in that checkout:
+The script starts the checkout's pinned Python environment and runs the MCP server on stdio. The MCP client starts and stops the process. To attach it to the two current Orca bots after the code is installed, run:
 
 ```sh
-orca bot tools add '/Users/chriskaneshiro/.hermes/hermes-agent/scripts/orca-hermes-bridge --profile-home /Users/chriskaneshiro/.hermes/profiles/research --allow-board sandbox-pilot-20261114 --allow-assignee research' --name hermes-bridge --bot Atlas
-orca bot tools add '/Users/chriskaneshiro/.hermes/hermes-agent/scripts/orca-hermes-bridge --profile-home /Users/chriskaneshiro/.hermes/profiles/research --allow-board sandbox-pilot-20261114 --allow-assignee research' --name hermes-bridge --bot Research
+orca bot tools add '/Users/chriskaneshiro/.hermes/hermes-agent/scripts/hermes-control-mcp --profile-home /Users/chriskaneshiro/.hermes/profiles/research --allow-board sandbox-pilot-20261114 --allow-assignee research' --name hermes-bridge --bot Atlas
+orca bot tools add '/Users/chriskaneshiro/.hermes/hermes-agent/scripts/hermes-control-mcp --profile-home /Users/chriskaneshiro/.hermes/profiles/research --allow-board sandbox-pilot-20261114 --allow-assignee research' --name hermes-bridge --bot Research
 orca bot tools --bot Atlas --json
 orca bot tools --bot Research --json
 ```

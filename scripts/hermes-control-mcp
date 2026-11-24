@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stdio MCP entry point for external clients. The checkout's pinned Hermes environment is used.
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+exec "$repo_root/scripts/run-in-hermes-env" python -m agent.transports.hermes_control_mcp_server "$@"
